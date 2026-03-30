@@ -38,18 +38,6 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api/v1")
 
 
-@app.on_event("startup")
-async def startup_event() -> None:
-    loguru.logger.info("Starting up...")
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    try:
-        from app.core.database_seed import seed_database
-
-        await seed_database()
-    except Exception as exc:
-        loguru.logger.error(f"Database seeding failed: {exc}")
 
 
 @app.on_event("shutdown")

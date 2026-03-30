@@ -14,7 +14,7 @@ click==8.3.0
 click-didyoumean==0.3.1
 click-plugins==1.1.1.2
 click-repl==0.3.0
-fastapi==0.104.1
+fastapi==0.111.1
 filelock==3.20.0
 fsspec==2025.10.0
 greenlet==3.2.4
@@ -98,3 +98,13 @@ pytesseract==0.3.10
 pdf2image==1.17.0
 Pillow==10.2.0
 reportlab==4.0.9
+gunicorn==21.2.0
+pydantic-settings==2.1.0
+loguru==0.7.2
+passlib[argon2]==1.7.4
+fastapi-users[sqlalchemy]==12.1.2
+python-jose[cryptography]==3.3.0
+argon2-cffi==23.1.0
+minio==7.1.14
+prometheus-fastapi-instrumentator==6.0.0
+open-clip-torch==2.20.0
