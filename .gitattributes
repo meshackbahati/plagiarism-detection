@@ -1,0 +1,8 @@
+# Set default behavior to handle line endings.
+* text=auto
+
+# Force LF for shell scripts to ensure they run correctly in Docker on Windows.
+*.sh text eol=lf
+backend/startup.sh text eol=lf
+frontend/Dockerfile text eol=lf
+backend/Dockerfile text eol=lf

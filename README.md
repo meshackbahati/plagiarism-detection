@@ -20,6 +20,7 @@ Plagiarism + AI-generated text detection platform with a React frontend, FastAPI
 
 - Docker Desktop (Windows/macOS) or Docker Engine + Compose plugin (Linux)
 - Git
+- Python 3.11+ (Required for local development without Docker)
 
 ### 1. Clone
 
@@ -44,15 +45,17 @@ Copy-Item backend/.env.docker.example backend/.env.docker
 
 Edit `backend/.env.docker` and set at minimum:
 
-- `SECRET_KEY` to a long random string
+- `SECRET_KEY` to a long random string (e.g., `openssl rand -hex 32`)
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
 
-### 3. Start everything
+### 3. Start everything (Docker Recommended)
 
 ```bash
 docker compose up --build -d
 ```
+
+**Windows Users:** If you encounter issues with Docker startup on Windows, ensure you are using Docker Desktop with the WSL2 backend. If `startup.sh` is not found, try rebuilding with `docker compose build --no-cache api`.
 
 ### 4. Open the app
 
@@ -69,7 +72,7 @@ docker compose up --build -d
 
 ## Local Development (without Docker, optional)
 
-### Backend
+### Backend (Requires Python 3.11+)
 
 ```bash
 cd backend
@@ -88,9 +91,15 @@ Windows PowerShell:
 .\.venv\Scripts\Activate.ps1
 ```
 
+**Important for Windows Local Development:**
+1. Ensure Python 3.11 is installed and in your PATH.
+2. Install [Tesseract OCR for Windows](https://github.com/UB-Mannheim/tesseract/wiki) and [Poppler for Windows](http://blog.alivate.com.au/poppler-windows/).
+3. Add Tesseract and Poppler bin directories to your Windows System PATH.
+
 Install deps and run:
 
 ```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```

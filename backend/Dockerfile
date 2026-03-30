@@ -25,9 +25,12 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
+# Copy startup script first to ensure it's available and has correct permissions
+COPY startup.sh /app/startup.sh
+RUN chmod +x /app/startup.sh
+
 # Copy project
 COPY . .
-RUN chmod +x /app/startup.sh
 
 # Expose port
 EXPOSE 8000
