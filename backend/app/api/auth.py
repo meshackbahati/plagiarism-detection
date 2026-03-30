@@ -6,6 +6,8 @@ from fastapi_users import FastAPIUsers
 from fastapi_users.authentication import AuthenticationBackend, BearerTransport, JWTStrategy
 from fastapi_users.db import SQLAlchemyUserDatabase
 from fastapi_users.manager import BaseUserManager, UUIDIDMixin
+from fastapi_users.password import PasswordHelper
+from passlib.context import CryptContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -49,8 +51,11 @@ async def get_user_db(session: AsyncSession = Depends(get_db)) -> AsyncGenerator
     yield SQLAlchemyUserDatabase(session, User)
 
 
+password_helper = PasswordHelper(CryptContext(schemes=["argon2"], deprecated="auto"))
+
+
 async def get_user_manager(user_db: SQLAlchemyUserDatabase = Depends(get_user_db)) -> AsyncGenerator[UserManager, None]:
-    yield UserManager(user_db)
+    yield UserManager(user_db, password_helper=password_helper)
 
 
 fastapi_users = FastAPIUsers[User, UUID](get_user_manager, [auth_backend])

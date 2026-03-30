@@ -5,12 +5,11 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select
 from app.core.config import settings
-from app.models.user import User
-from app.models.base import Base
+from app.models import User, Base, Batch, Document, Comparison, AIDetection
 from passlib.context import CryptContext
 
 # Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 async def get_async_session():
     """Create async database session"""
@@ -24,13 +23,24 @@ async def get_user_by_email(session: AsyncSession, email: str) -> User:
     result = await session.execute(select(User).filter(User.email == email))
     return result.scalar_one_or_none()
 
-async def create_user(session: AsyncSession, email: str, password: str, role: str = "user") -> User:
+async def create_user(
+    session: AsyncSession,
+    email: str,
+    password: str,
+    role: str = "user",
+    is_active: bool = True,
+    is_verified: bool = False,
+    is_superuser: bool = False,
+) -> User:
     """Create a new user"""
     hashed_password = pwd_context.hash(password)
     user = User(
         email=email,
         hashed_password=hashed_password,
-        role=role
+        role=role,
+        is_active=is_active,
+        is_verified=is_verified,
+        is_superuser=is_superuser,
     )
     session.add(user)
     await session.commit()
@@ -58,7 +68,15 @@ async def seed_database():
             
             existing_admin = await get_user_by_email(session, admin_email)
             if not existing_admin:
-                admin_user = await create_user(session, admin_email, admin_password, "admin")
+                admin_user = await create_user(
+                    session,
+                    admin_email,
+                    admin_password,
+                    "admin",
+                    is_active=True,
+                    is_verified=True,
+                    is_superuser=True,
+                )
                 print(f"Created admin user: {admin_user.email}")
             else:
                 print(f"Admin user already exists: {existing_admin.email}")
@@ -79,7 +97,9 @@ async def seed_database():
                             session,
                             user_data["email"],
                             user_data["password"],
-                            user_data["role"]
+                            user_data["role"],
+                            is_active=True,
+                            is_verified=True,
                         )
                         print(f"Created user: {user.email} with role: {user.role}")
                     else:

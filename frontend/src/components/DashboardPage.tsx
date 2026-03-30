@@ -48,24 +48,7 @@ const DashboardPage = () => {
                 </div>
             )}
 
-            <div style={{ display: 'flex', gap: '16px', marginBottom: '40px' }}>
-                <button
-                    onClick={() => {
-                        alert("Please go to a specific batch to export results.");
-                    }}
-                    className="btn-secondary"
-                    style={{ padding: '12px 24px', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}
-                >
-                    <span>📄</span> Export PDF Report
-                </button>
-                <button
-                    onClick={() => alert("Please go to a specific batch to export results.")}
-                    className="btn-secondary"
-                    style={{ padding: '12px 24px', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}
-                >
-                    <span>📊</span> Export CSV Data
-                </button>
-            </div>
+            {/* Dashboard level exports removed to avoid ambiguity without a batch context. */}
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '32px', marginBottom: '60px' }}>
                 {[

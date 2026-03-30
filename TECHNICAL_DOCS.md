@@ -95,6 +95,8 @@ Similarity Analysis → Results Storage → User Interface
 - `POST /api/v1/analyze` - Submit documents for analysis
 - `POST /api/v1/ai-detection` - Direct AI detection
 - `GET /api/v1/batches/{batch_id}/results` - Get batch results
+- `GET /api/v1/batches/{batch_id}/export/pdf` - Export results as PDF
+- `GET /api/v1/batches/{batch_id}/export/csv` - Export results as CSV
 - `GET /api/v1/ai-detection/health` - AI service health check
 - `GET /health` - System health check
 
@@ -162,7 +164,7 @@ def process_batch(batch_id: str, provider: str = "local", ai_threshold: float = 
 #### Authentication
 - JWT tokens with configurable expiration
 - Secure cookie transport
-- Password hashing with bcrypt
+- Password hashing with Argon2
 - Role-based access control (user/moderator/admin)
 
 #### Authorization

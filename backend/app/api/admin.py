@@ -12,7 +12,7 @@ from uuid import UUID
 from typing import List
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 
 class AdminCreateUserRequest(BaseModel):

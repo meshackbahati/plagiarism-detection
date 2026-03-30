@@ -12,6 +12,9 @@ Plagiarism + AI-generated text detection platform with a React frontend, FastAPI
 - File parsing now handles uploaded files and in-memory buffers safely.
 - Sensitive reset/verification tokens are no longer logged.
 - Insecure sample user seeding is now opt-in (`CREATE_SAMPLE_USERS=true`).
+- Password hashing upgraded to Argon2 for better security.
+- Comprehensive user dashboard with statistics and activity metrics.
+- Report export functionality (PDF/CSV) for analysis results.
 - Docs and env templates are updated for cross-platform use.
 
 ## Quick Start (Windows, macOS, Linux)
