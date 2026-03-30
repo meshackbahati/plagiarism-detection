@@ -3,7 +3,7 @@ from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Integer
 from sqlalchemy.dialects.postgresql import UUID, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from app.core.db import Base
+from .base import Base
 
 class Comparison(Base):
     __tablename__ = "comparisons"
