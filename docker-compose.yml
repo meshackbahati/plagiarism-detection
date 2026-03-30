@@ -47,6 +47,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: plagiarism_api
+    command: /app/startup.sh api
     ports:
       - "8000:8000"
     depends_on:
@@ -63,7 +64,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: plagiarism_celery_worker
-    command: celery -A app.core.celery.app worker -l info
+    command: /app/startup.sh celery -A app.core.celery.app worker -l info
     depends_on:
       - redis
       - api
@@ -77,7 +78,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: plagiarism_celery_beat
-    command: celery -A app.core.celery.app beat -l info
+    command: /app/startup.sh celery -A app.core.celery.app beat -l info
     depends_on:
       - redis
       - api
