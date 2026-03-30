@@ -7,8 +7,10 @@ import json
 
 from app.core.db import get_db
 from app.models.user import User
+from fastapi.responses import Response, StreamingResponse
 from app.api.auth import fastapi_users
 from app.services.ai_detection import AIDetectionService
+from app.services.report import ReportService
 from app.core.provider_router import ProviderType
 
 router = APIRouter()
@@ -219,3 +221,63 @@ async def get_batch_results(
         })
         
     return {"status": "ok", "data": results}
+
+@router.get("/batches/{batch_id}/export/pdf")
+async def export_batch_pdf(
+    batch_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(fastapi_users.current_user())
+):
+    """Export batch results as PDF"""
+    from app.models import Batch, Document
+    from sqlalchemy import select
+
+    batch_result = await db.execute(
+        select(Batch).where(Batch.id == batch_id, Batch.user_id == user.id)
+    )
+    batch = batch_result.scalar_one_or_none()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    documents_result = await db.execute(
+        select(Document).where(Document.batch_id == batch_id)
+    )
+    documents = documents_result.scalars().all()
+
+    pdf_content = ReportService.generate_pdf_report(batch, documents)
+
+    return Response(
+        content=pdf_content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=report_{batch_id}.pdf"}
+    )
+
+@router.get("/batches/{batch_id}/export/csv")
+async def export_batch_csv(
+    batch_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(fastapi_users.current_user())
+):
+    """Export batch results as CSV"""
+    from app.models import Batch, Document
+    from sqlalchemy import select
+
+    batch_result = await db.execute(
+        select(Batch).where(Batch.id == batch_id, Batch.user_id == user.id)
+    )
+    batch = batch_result.scalar_one_or_none()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    documents_result = await db.execute(
+        select(Document).where(Document.batch_id == batch_id)
+    )
+    documents = documents_result.scalars().all()
+
+    csv_content = ReportService.generate_csv_report(documents)
+
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=report_{batch_id}.csv"}
+    )

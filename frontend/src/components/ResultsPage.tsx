@@ -76,11 +76,43 @@ const ResultsPage: React.FC = () => {
         );
     }
 
+    const handleExport = async (type: 'pdf' | 'csv') => {
+        try {
+            const token = localStorage.getItem('token');
+            const response = await fetch(`/api/v1/batches/${batchId}/export/${type}`, {
+                headers: { 'Authorization': `Bearer ${token}` },
+            });
+
+            if (!response.ok) throw new Error('Export failed');
+
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `report_${batchId}.${type}`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+        } catch (e: any) {
+            alert(`Error exporting: ${e.message}`);
+        }
+    };
+
     return (
         <div className="fade-in" style={{ padding: '60px 0', maxWidth: '1000px', margin: '0 auto' }}>
-            <div style={{ marginBottom: '40px' }}>
-                <h1 className="text-gradient" style={{ fontSize: '48px', fontWeight: 800 }}>Analysis Report</h1>
-                <p style={{ color: 'var(--text-secondary)' }}>Batch ID: {batchId}</p>
+            <div style={{ marginBottom: '40px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+                <div>
+                    <h1 className="text-gradient" style={{ fontSize: '48px', fontWeight: 800 }}>Analysis Report</h1>
+                    <p style={{ color: 'var(--text-secondary)' }}>Batch ID: {batchId}</p>
+                </div>
+                <div style={{ display: 'flex', gap: '12px' }}>
+                    <button onClick={() => handleExport('pdf')} className="btn-secondary" style={{ padding: '10px 20px', fontSize: '14px' }}>
+                        PDF Export
+                    </button>
+                    <button onClick={() => handleExport('csv')} className="btn-secondary" style={{ padding: '10px 20px', fontSize: '14px' }}>
+                        CSV Export
+                    </button>
+                </div>
             </div>
 
             <div style={{ display: 'grid', gap: '32px' }}>

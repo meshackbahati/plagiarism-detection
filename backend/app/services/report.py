@@ -27,7 +27,7 @@ class ReportService:
                 doc.status,
                 f"{doc.ai_score:.2f}" if doc.ai_score is not None else "N/A",
                 "Yes" if doc.is_ai_generated else "No",
-                f"{self._calculate_plagiarism_score(doc, documents):.2f}"
+                f"{cls._calculate_plagiarism_score(doc, documents):.2f}"
             ])
             
         return output.getvalue()
