@@ -26,7 +26,6 @@ celery = "^5.3.6"
 redis = "^5.0.1"
 
 # Authentication and Security
-fastapi-users = {extras = ["sqlalchemy"], version = "^13.0.0"}
 passlib = {extras = ["argon2"], version = "^1.7.4"}
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 boto3 = "^1.28.57"

@@ -28,8 +28,7 @@ app.add_middleware(
 )
 
 # Auth and user routers (both canonical and v1 aliases for frontend compatibility).
-app.include_router(auth_router, prefix="/api/auth")
-app.include_router(auth_router, prefix="/api/v1/auth")
+# Registration and login routes are disabled in the local tool version
 app.include_router(users_router, prefix="/api/users")
 app.include_router(users_router, prefix="/api/v1/users")
 
