@@ -3,10 +3,6 @@ import { AuthProvider } from './components/AuthProvider';
 import ProtectedRoute from './components/ProtectedRoute';
 import MainLayout from './components/MainLayout';
 import LandingPage from './components/LandingPage';
-import LoginPage from './components/LoginPage';
-import RegisterPage from './components/RegisterPage';
-import ForgotPasswordPage from './components/ForgotPasswordPage';
-import ResetPasswordPage from './components/ResetPasswordPage';
 import DashboardPage from './components/DashboardPage';
 import UploadForm from './components/UploadForm';
 import AIDetectionPage from './components/AIDetectionPage';
@@ -21,10 +17,6 @@ function App() {
         <Routes>
           <Route path="/" element={<MainLayout />}>
             <Route index element={<LandingPage />} />
-            <Route path="login" element={<LoginPage />} />
-            <Route path="register" element={<RegisterPage />} />
-            <Route path="forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="reset-password" element={<ResetPasswordPage />} />
             <Route path="dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
             <Route path="upload" element={<ProtectedRoute><UploadForm /></ProtectedRoute>} />
             <Route path="ai-check" element={<ProtectedRoute><AIDetectionPage /></ProtectedRoute>} />

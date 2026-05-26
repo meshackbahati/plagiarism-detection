@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from app.api.auth import fastapi_users
+from app.api.auth import get_current_user
 from app.models.user import User
 from app.schemas import UserRead
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 @router.get("/me", response_model=UserRead)
-async def get_current_user(user: User = Depends(fastapi_users.current_user())):
+async def get_current_user_info(user: User = Depends(get_current_user)):
     """Get current authenticated user"""
     return user
 
@@ -20,7 +20,7 @@ async def get_current_user(user: User = Depends(fastapi_users.current_user())):
 @router.get("/{user_id}", response_model=UserRead)
 async def get_user_by_id(
     user_id: UUID,
-    current_user: User = Depends(fastapi_users.current_user()),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get user by ID (admin or self only)"""
@@ -40,7 +40,7 @@ async def get_user_by_id(
 
 @router.get("/me/dashboard")
 async def get_user_dashboard(
-    current_user: User = Depends(fastapi_users.current_user()),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Get dashboard statistics for current user"""

@@ -8,7 +8,7 @@ import json
 from app.core.db import get_db
 from app.models.user import User
 from fastapi.responses import Response, StreamingResponse
-from app.api.auth import fastapi_users
+from app.api.auth import get_current_user
 from app.services.ai_detection import AIDetectionService
 from app.services.report import ReportService
 from app.core.provider_router import ProviderType
@@ -34,7 +34,7 @@ async def analyze_content(
     text: Optional[str] = Form(default=None),
     options: str = Form(default='{"provider": "local", "check_plagiarism": true, "check_ai": true}'),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(fastapi_users.current_user())
+    user: User = Depends(get_current_user)
 ):
     """
     Unified endpoint for analyzing content (files or text).
@@ -135,7 +135,7 @@ async def detect_ai_only(
     text: str = Body(..., embed=True),
     provider: str = Body("local", embed=True),
     threshold: float = Body(0.5, embed=True),
-    user: User = Depends(fastapi_users.current_user())
+    user: User = Depends(get_current_user)
 ):
     """
     Direct AI detection endpoint for text.
@@ -166,7 +166,7 @@ async def detect_ai_only(
 async def get_batch_results(
     batch_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(fastapi_users.current_user())
+    user: User = Depends(get_current_user)
 ):
     """
     Get detailed results for a batch, including AI scores and plagiarism matches.
@@ -226,7 +226,7 @@ async def get_batch_results(
 async def export_batch_pdf(
     batch_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(fastapi_users.current_user())
+    user: User = Depends(get_current_user)
 ):
     """Export batch results as PDF"""
     from app.models import Batch, Document
@@ -256,7 +256,7 @@ async def export_batch_pdf(
 async def export_batch_csv(
     batch_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(fastapi_users.current_user())
+    user: User = Depends(get_current_user)
 ):
     """Export batch results as CSV"""
     from app.models import Batch, Document

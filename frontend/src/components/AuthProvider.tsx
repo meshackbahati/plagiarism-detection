@@ -2,63 +2,54 @@ import { useState, useEffect, ReactNode } from 'react';
 import { AuthContext, User } from '../contexts/AuthContext';
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  const [token, setToken] = useState<string | null>(null);
+  const token = 'local-tool-token';
   const [user, setUser] = useState<User | null>(null);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(true);
 
   useEffect(() => {
-    const storedToken = localStorage.getItem('token');
-    if (storedToken) {
-      setToken(storedToken);
-      // Try to fetch user info to populate user data
-      fetchUserInfo(storedToken);
-    }
+    // Always fetch user info for the local tool
+    fetchUserInfo();
   }, []);
 
-  const fetchUserInfo = async (token: string) => {
+  const fetchUserInfo = async () => {
     try {
-      const response = await fetch('/api/v1/users/me', {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
+      const response = await fetch('/api/v1/users/me');
 
       if (response.ok) {
         const userData = await response.json();
         const userObj: User = {
           id: userData.id,
           email: userData.email,
-          role: userData.role || 'user'
+          role: userData.role || 'admin'
         };
         setUser(userObj);
         setIsAuthenticated(true);
       } else {
-        // If user info fetch fails, clear the token
-        localStorage.removeItem('token');
-        setToken(null);
-        setUser(null);
-        setIsAuthenticated(false);
+        console.error('Failed to fetch user info, using fallback');
+        setUser({
+          id: '00000000-0000-0000-0000-000000000000',
+          email: 'admin@example.com',
+          role: 'admin'
+        });
+        setIsAuthenticated(true);
       }
     } catch (error) {
       console.error('Error fetching user info:', error);
-      // If there's an error, clear the token
-      localStorage.removeItem('token');
-      setToken(null);
-      setUser(null);
-      setIsAuthenticated(false);
+      setUser({
+        id: '00000000-0000-0000-0000-000000000000',
+        email: 'admin@example.com',
+        role: 'admin'
+      });
+      setIsAuthenticated(true);
     }
   };
 
-  const login = async (newToken: string) => {
-    localStorage.setItem('token', newToken);
-    setToken(newToken);
-    // Fetch user info after login
-    await fetchUserInfo(newToken);
+  const login = async (_newToken: string) => {
+    // No-op for local tool
   };
 
   const logout = () => {
-    localStorage.removeItem('token');
-    setToken(null);
-    setUser(null);
-    setIsAuthenticated(false);
+    // No-op for local tool
   };
 
   return (
