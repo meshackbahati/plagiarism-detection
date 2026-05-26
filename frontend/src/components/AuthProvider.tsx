@@ -2,7 +2,7 @@ import { useState, useEffect, ReactNode } from 'react';
 import { AuthContext, User } from '../contexts/AuthContext';
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  const [token, setToken] = useState<string | null>('local-tool-token');
+  const token = 'local-tool-token';
   const [user, setUser] = useState<User | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(true);
 
@@ -31,6 +31,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           email: 'admin@example.com',
           role: 'admin'
         });
+        setIsAuthenticated(true);
       }
     } catch (error) {
       console.error('Error fetching user info:', error);
@@ -39,6 +40,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         email: 'admin@example.com',
         role: 'admin'
       });
+      setIsAuthenticated(true);
     }
   };
 
