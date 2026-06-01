@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 
 import loguru
 from fastapi import FastAPI
@@ -12,7 +13,15 @@ from app.core.db import async_engine
 from app.models.base import Base
 
 
-app = FastAPI(title="Plagiarism Detection API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    yield
+    # Shutdown
+    loguru.logger.info("Shutting down...")
+
+
+app = FastAPI(title="Plagiarism Detection API", lifespan=lifespan)
 
 # CORS: strict by default, open in development only.
 allowed_origins = ["http://localhost:5173", "http://localhost:80", "http://localhost"]
@@ -37,11 +46,6 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api/v1")
 
 
-
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    loguru.logger.info("Shutting down...")
 
 
 @app.get("/health")

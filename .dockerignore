@@ -1,0 +1,21 @@
+# Root .dockerignore for frontend build context (context: .)
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+*.pyc
+.env
+.env.*
+.venv/
+venv/
+node_modules/
+*.log
+.vscode/
+.idea/
+*.swp
+*.swo
+backend/uploads/
+backend/*.sqlite3
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

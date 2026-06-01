@@ -2,43 +2,52 @@
 
 ## Overview
 
-The plagiarism detection system uses **semantic similarity analysis** at the chunk level, powered by Sentence-BERT embeddings and cosine similarity scoring.
+The plagiarism detection system uses **semantic similarity analysis** at the chunk level, powered by Sentence-BERT embeddings and cosine similarity scoring. Documents are compared both within the same batch and across all previously uploaded batches using pgvector.
 
 ## Algorithm Flow
 
 ```
-Document A                    Document B
-    ↓                             ↓
-┌─────────────┐            ┌─────────────┐
-│  Chunking   │            │  Chunking   │
-└──────┬──────┘            └──────┬──────┘
-       │                          │
-   [500 chars]                [500 chars]
-   50 overlap                 50 overlap
-       │                          │
-       ↓                          ↓
-┌─────────────┐            ┌─────────────┐
-│  Embedding  │            │  Embedding  │
-│   (SBERT)   │            │   (SBERT)   │
-└──────┬──────┘            └──────┬──────┘
-       │                          │
-       └──────────┬───────────────┘
-                  ↓
-         ┌────────────────┐
-         │ Cosine Similarity│
-         │  (Chunk × Chunk) │
-         └────────┬─────────┘
-                  ↓
-            ┌──────────┐
-            │Score > 0.75?│
-            └─────┬──────┘
-                  ↓
-            [Store Match]
-                  ↓
-         ┌─────────────────┐
-         │ Overall Score:  │
-         │ Σ(matches) / N  │
-         └─────────────────┘
+                    Batch Processing Pipeline
+                    ========================
+
+Phase 1: Pre-compute Embeddings (once per document)
+────────────────────────────────────────────────────
+Document A        Document B        Document C
+    ↓                 ↓                 ↓
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│ Chunking │     │ Chunking │     │ Chunking │   500 chars, 50 overlap
+└────┬────┘     └────┬────┘     └────┬────┘
+     ↓               ↓               ↓
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│ SBERT    │     │ SBERT    │     │ SBERT    │   Encode each chunk
+│ Encode   │     │ Encode   │     │ Encode   │
+└────┬────┘     └────┬────┘     └────┬────┘
+     ↓               ↓               ↓
+ [Cache A]       [Cache B]       [Cache C]      Stored in memory
+     ↓               ↓               ↓
+ doc.embedding = mean(all chunks)                Stored in DB (pgvector)
+
+
+Phase 2: Pairwise Comparison (using cached embeddings)
+──────────────────────────────────────────────────────
+     A vs B          A vs C          B vs C
+        ↓               ↓               ↓
+  Vectorized cosine similarity (numpy matrix multiply)
+        ↓               ↓               ↓
+  Matches > 0.75    Matches > 0.75    Matches > 0.75
+        ↓               ↓               ↓
+  Store Comparison  Store Comparison  Store Comparison
+
+
+Phase 3: Cross-Batch Search (pgvector)
+───────────────────────────────────────
+  For each document:
+    SELECT * FROM documents
+    WHERE embedding IS NOT NULL
+    ORDER BY embedding <=> doc.embedding
+    LIMIT 500
+
+  → Store cross-batch matches with "cross_batch: true" flag
 ```
 
 ## Step-by-Step
@@ -52,60 +61,45 @@ chunk_size = 500  # characters
 overlap = 50      # characters
 ```
 
-**Why Chunking?**
-- **Granularity:** Detect localized plagiarism (e.g., a single paragraph)
-- **Context:** Preserve semantic meaning within each chunk
-- **Scalability:** Process long documents without hitting model limits
+500 chars is approximately 3-5 sentences, providing a balance between context preservation and localized match detection.
 
-**Trade-offs:**
-- Too small → Loss of context, noisy matches
-- Too large → Miss localized plagiarism
-- 500 chars ≈ 3-5 sentences, empirically good balance
-
-### 2. Embedding Generation
+### 2. Embedding Generation (Cached)
 
 **Model:** `sentence-transformers/all-MiniLM-L6-v2`
 
-**Specifications:**
-- **Dimensions:** 384
-- **Max Sequence:** 256 tokens (~512 chars)
-- **Speed:** ~1000 sentences/sec on CPU
-- **Quality:** Optimized for semantic search
+| Spec | Value |
+|------|-------|
+| Dimensions | 384 |
+| Max Sequence | 256 tokens (~512 chars) |
+| Memory | ~80MB |
 
-**Why SBERT?**
-- Pre-trained on paraphrase detection tasks
-- Captures semantic similarity, not just lexical overlap
-- Fast inference (vs full transformer models)
+**Key optimization:** Each document is encoded **exactly once** during Phase 1. The chunks and their embeddings are cached in `PlagiarismService._embedding_cache` and reused for all pairwise comparisons. This eliminates the previous O(N*M) re-encoding where every comparison re-ran the sentence-transformer model.
 
-### 3. Similarity Calculation
+**Document-level embedding:** The chunk embeddings are averaged into a single 384-dimensional vector stored on `Document.embedding` in PostgreSQL. This enables cross-batch similarity search via pgvector.
 
-**Metric:** Cosine Similarity
+### 3. Pairwise Comparison (Vectorized)
+
+**Previous approach** (removed): For each chunk in doc A, iterate through every chunk in doc B using a Python loop. O(N*M) Python-level comparisons.
+
+**Current approach:** Doc B's embeddings are stacked into a numpy matrix. Each chunk in A is compared against ALL chunks in B via a single matrix-vector multiply:
 
 ```python
-similarity = dot(vec_a, vec_b) / (||vec_a|| * ||vec_b||)
+matrix_b = np.array(embeddings_b)   # (M, dim)
+normed_b = matrix_b / norms_b       # Normalize once
+
+for chunk_a in embeddings_a:
+    normed_a = chunk_a / norm_a
+    similarities = normed_b @ normed_a  # (M,) -- all at once
+    best_idx = np.argmax(similarities)
 ```
 
-**Range:** -1 to 1 (we use 0 to 1 after normalization)
-
-**Interpretation:**
-- `1.0` → Identical semantic meaning
-- `0.75-1.0` → High similarity (plagiarism threshold)
-- `0.5-0.75` → Moderate similarity (paraphrasing)
-- `< 0.5` → Low similarity (different content)
+This reduces Python-level iterations from N*M to N, with the inner loop handled by optimized BLAS routines.
 
 ### 4. Match Detection
 
-**Threshold:** 0.75
+**Threshold:** 0.75 cosine similarity
 
-For each chunk in Document A:
-1. Compare against all chunks in Document B
-2. Select best match (highest score)
-3. If score > 0.75 → **MATCH**
-
-**Why 0.75?**
-- Empirically validated to reduce false positives
-- Strict enough to avoid matching unrelated content
-- Lenient enough to catch paraphrased plagiarism
+For each chunk in Document A, the best matching chunk in Document B is identified. If the cosine similarity exceeds 0.75, it's recorded as a match with the source text, target text, and score.
 
 ### 5. Overall Score Calculation
 
@@ -113,79 +107,108 @@ For each chunk in Document A:
 overall_score = sum(matched_chunk_scores) / total_chunks_in_A
 ```
 
-**Interpretation:**
-- `0.8-1.0` → Very high plagiarism (80%+ of document matches)
-- `0.5-0.8` → Significant plagiarism
-- `0.2-0.5` → Moderate overlap (could be coincidence/common references)
-- `< 0.2` → Low/no plagiarism
+| Score Range | Interpretation |
+|------------|----------------|
+| 0.8-1.0 | Very high plagiarism (80%+ of document matches) |
+| 0.5-0.8 | Significant plagiarism |
+| 0.2-0.5 | Moderate overlap |
+| < 0.2 | Low/no plagiarism |
+
+### 6. Cross-Batch Plagiarism Detection
+
+After within-batch comparisons, each document is searched against **all previously analyzed documents** using pgvector's cosine distance operator:
+
+```sql
+SELECT d.id, d.filename, d.batch_id,
+       1 - (d.embedding <=> :embedding::vector) AS similarity
+FROM documents d
+WHERE d.embedding IS NOT NULL
+  AND d.status = 'completed'
+  AND d.batch_id != :current_batch
+ORDER BY d.embedding <=> :embedding::vector
+LIMIT :max_docs
+```
+
+- Controlled by `MAX_CROSS_BATCH_DOCS` env var (default: 500)
+- Cross-batch matches are stored in the `Comparison` table with a `cross_batch: true` flag in the matches JSON
+- Uses the document-level embedding (averaged from chunk embeddings) for fast approximate search
+
+## Performance Characteristics
+
+### Memory
+
+| Component | Memory |
+|-----------|--------|
+| Embedding model (all-MiniLM-L6-v2) | ~80MB |
+| Embedding cache (per document) | ~1.5KB per chunk (384 floats * 4 bytes) |
+| Typical 10-doc batch | ~150KB cache |
+
+The embedding cache is cleared after each batch via `PlagiarismService.clear_cache()`.
+
+### Models
+
+The embedding model is managed by the shared `ModelManager`:
+- **Lazy-loaded** on first use (not at import time)
+- **Auto-unloaded** after `MODEL_UNLOAD_TIMEOUT` seconds of inactivity
+- **Skipped entirely** in `LIGHTWEIGHT_MODE=true` (plagiarism detection disabled)
+
+### Scalability
+
+| Batch Size | Comparisons | Approx Time |
+|-----------|-------------|-------------|
+| 5 docs | 10 pairs | Fast |
+| 20 docs | 190 pairs | Moderate |
+| 50 docs | 1,225 pairs | Slow |
+
+For very large batches, the Celery worker processes one batch at a time (`--concurrency=1`) to prevent memory exhaustion. The worker restarts after every 5 tasks (`worker_max_tasks_per_child=5`) to prevent memory leaks.
 
 ## Limitations
 
 ### False Positives
-
-**Common Phrases:**
-- Technical jargon (e.g., "machine learning model")
-- Standard academic language (e.g., "the results show that")
-- **Mitigation:** Threshold tuning, exclude common n-grams (future work)
-
-**Domain-Specific Vocabulary:**
-- Legal documents, medical texts have repetitive language
-- **Mitigation:** Domain-specific models (future work)
+- Common technical jargon and standard academic phrasing
+- Domain-specific vocabulary (legal, medical)
 
 ### False Negatives
+- Synonym substitution (SBERT catches most but not all)
+- Structural plagiarism (copying idea structure without copying text)
+- Cross-lingual plagiarism (requires multilingual models)
 
-**Synonym Substitution:**
-- SBERT is good but not perfect at catching all paraphrases
-- **Mitigation:** Ensemble with lexical overlap metrics (future work)
+### Comparison Scope
+- Within-batch: all document pairs compared
+- Cross-batch: document-level embedding search (less granular than chunk-level)
+- Does NOT search the internet or external databases
 
-**Structural Plagiarism:**
-- Copying idea structure without copying text
-- **Limitation:** Our system doesn't detect this
+## Output Schema
 
-**Cross-Lingual Plagiarism:**
-- Translation-based plagiarism
-- **Limitation:** Requires multilingual models (future work)
+Within-batch comparison stored in `Comparison` table:
+```python
+{
+    "doc_a": "uuid",
+    "doc_b": "uuid",
+    "similarity": 0.78,
+    "matches": [
+        {
+            "source_chunk": "The quick brown fox...",
+            "target_chunk": "A fast brown fox...",
+            "score": 0.82,
+            "source_index": 3,
+            "target_index": 7
+        }
+    ]
+}
+```
 
-### Performance Constraints
-
-**Complexity:** O(N × M) where N, M = chunk counts
-
-**Scalability Issues:**
-- 100-page document × 100-page document = ~20,000 comparisons
-- **Mitigation:** Use FAISS or pgvector for approximate nearest neighbor search
-
-## Comparison Scope
-
-**Important:** This system **only** compares documents within the same uploaded batch.
-
-**It does NOT:**
-- Search the internet for sources
-- Check against a global plagiarism database
-- Compare with previous batches (unless explicitly configured)
-
-**Why Batch-Only?**
-- Privacy: User data stays isolated
-- Performance: Avoid massive corpus comparisons
-- Scope: Designed for academic course/assignment checking
-
-## Future Enhancements
-
-### Planned Improvements
-
-1. **N-gram Overlap:** Add lexical similarity for exact-match detection
-2. **FAISS Integration:** Speed up chunk search with approximate NN
-3. **External Corpus:** Option to check against public datasets (arXiv, Wikipedia)
-4. **Citation Detection:** Exclude properly cited passages
-5. **Paraphrase Quality:** More sophisticated paraphrase detection models
-
-### Research Directions
-
-- **Graph-based Similarity:** Model document structure
-- **Cross-lingual Detection:** Multilingual embeddings
-- **Code Plagiarism:** Specialized AST-based comparison for source code
-
-## References
-
-- **Sentence-BERT:** [Reimers & Gurevych, 2019](https://arxiv.org/abs/1908.10084)
-- **Cosine Similarity:** Standard metric in information retrieval
-- **Chunking Strategy:** Inspired by long-document summarization techniques
+Cross-batch comparison:
+```python
+{
+    "doc_a": "uuid",
+    "doc_b": "uuid-from-another-batch",
+    "similarity": 0.65,
+    "matches": [
+        {
+            "cross_batch": true,
+            "source_filename": "essay_final.pdf"
+        }
+    ]
+}
+```

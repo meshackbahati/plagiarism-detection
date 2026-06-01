@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
+import { apiRequest } from '../utils/api';
 
 const BatchResultsPage = () => {
     const { batchId } = useParams();
@@ -11,13 +12,7 @@ const BatchResultsPage = () => {
         const fetchResults = async () => {
             setIsLoading(true);
             try {
-                const token = localStorage.getItem('token');
-                const response = await fetch(`/api/v1/batches/${batchId}/results`, {
-                    headers: { 'Authorization': `Bearer ${token}` },
-                });
-
-                if (!response.ok) throw new Error('Failed to fetch results');
-                const data = await response.json();
+                const data = await apiRequest<{ data: any[] }>(`/api/v1/batches/${batchId}/results`);
                 setResults(data.data);
             } catch (e: any) {
                 setError(e.message);

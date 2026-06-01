@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { apiRequest } from '../utils/api';
 
 const AIDetectionPage = () => {
     const [text, setText] = useState('');
@@ -15,24 +16,12 @@ const AIDetectionPage = () => {
         setResult(null);
 
         try {
-            const token = localStorage.getItem('token');
-            const response = await fetch('/api/v1/ai-detection', {
+            const data = await apiRequest('/api/v1/ai-detection', {
                 method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ 
-                    text, 
-                    provider,
-                    threshold
-                }),
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text, provider, threshold }),
             });
-
-                if (!response.ok) throw new Error('Analysis failed');
-
-                const data = await response.json();
-                setResult(data);
+            setResult(data);
         } catch (e: any) {
             setError(e.message);
         } finally {

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { apiRequest } from '../utils/api';
 
 const UploadForm = () => {
     const [files, setFiles] = useState<File[]>([]);
@@ -37,21 +38,19 @@ const UploadForm = () => {
         formData.append('options', JSON.stringify(options));
 
         try {
-            const token = localStorage.getItem('token');
-            // Use V1 endpoint
-            const response = await fetch(`/api/v1/analyze`, {
+            // Client-side file size check (200MB limit)
+            const MAX_SIZE = 200 * 1024 * 1024;
+            const oversized = files.find(f => f.size > MAX_SIZE);
+            if (oversized) {
+                throw new Error(`File "${oversized.name}" is too large (${(oversized.size / 1024 / 1024).toFixed(1)}MB). Maximum is 200MB.`);
+            }
+
+            const response = await apiRequest<{ batch_id: string }>(`/api/v1/analyze`, {
                 method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}` },
                 body: formData,
             });
 
-            if (!response.ok) {
-                const data = await response.json();
-                throw new Error(data.detail || 'Upload failed');
-            }
-
-            const data = await response.json();
-            setBatchId(data.batch_id); // V1 returns direct object, not nested data
+            setBatchId(response.batch_id);
             setFiles([]);
         } catch (e: any) {
             setError(e.message);

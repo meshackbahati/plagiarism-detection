@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     USE_EXTERNAL_AI_DETECTION: bool = os.getenv("USE_EXTERNAL_AI_DETECTION", "false").lower() == "true"
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
     TOGETHER_API_KEY: Optional[str] = os.getenv("TOGETHER_API_KEY")
+
+    # Resource management
+    LIGHTWEIGHT_MODE: bool = os.getenv("LIGHTWEIGHT_MODE", "false").lower() == "true"
+    MODEL_UNLOAD_TIMEOUT: int = int(os.getenv("MODEL_UNLOAD_TIMEOUT", "300"))  # seconds idle before unloading
+    MAX_CROSS_BATCH_DOCS: int = int(os.getenv("MAX_CROSS_BATCH_DOCS", "500"))  # max docs for cross-batch search
     
     # Celery settings
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")

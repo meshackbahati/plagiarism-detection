@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { apiRequest } from '../utils/api';
 
 const AdminPage = () => {
     const [stats, setStats] = useState<any>(null);
@@ -15,34 +16,13 @@ const AdminPage = () => {
 
     const fetchData = async () => {
         try {
-            const token = localStorage.getItem('token');
-            
-            // Fetch stats
-            const statsResponse = await fetch('/api/admin/stats', {
-                headers: {
-                    'Authorization': `Bearer ${token}`
-                }
-            });
-            
-            if (statsResponse.ok) {
-                const statsData = await statsResponse.json();
-                setStats(statsData);
-            }
-            
-            // Fetch users
-            const usersResponse = await fetch('/api/admin/users', {
-                headers: {
-                    'Authorization': `Bearer ${token}`
-                }
-            });
-            
-            if (usersResponse.ok) {
-                const usersData = await usersResponse.json();
-                setUsers(usersData);
-            }
-            
-        } catch (err) {
-            setError('Failed to load admin data');
+            const statsData = await apiRequest('/api/admin/stats');
+            setStats(statsData);
+
+            const usersData = await apiRequest('/api/admin/users');
+            setUsers(usersData);
+        } catch (err: any) {
+            setError(err.message || 'Failed to load admin data');
             console.error(err);
         } finally {
             setLoading(false);
@@ -51,62 +31,40 @@ const AdminPage = () => {
 
     const handleCreateUser = async (e: React.FormEvent) => {
         e.preventDefault();
-        
+
         try {
-            const token = localStorage.getItem('token');
-            
-            const response = await fetch('/api/admin/users', {
+            await apiRequest('/api/admin/users', {
                 method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     email: newUserEmail,
                     password: newUserPassword,
                 }),
             });
-            
-            if (response.ok) {
-                alert('User created successfully');
-                setNewUserEmail('');
-                setNewUserPassword('');
-                setShowCreateForm(false);
-                fetchData(); // Refresh data
-            } else {
-                const errorData = await response.json();
-                alert(`Error: ${errorData.detail || 'Failed to create user'}`);
-            }
-        } catch (err) {
-            alert('Failed to create user');
+
+            alert('User created successfully');
+            setNewUserEmail('');
+            setNewUserPassword('');
+            setShowCreateForm(false);
+            fetchData();
+        } catch (err: any) {
+            alert(`Error: ${err.message}`);
             console.error(err);
         }
     };
 
     const handleUpdateRole = async (userId: string, newRole: string) => {
         try {
-            const token = localStorage.getItem('token');
-            
-            const response = await fetch(`/api/admin/users/${userId}`, {
+            await apiRequest(`/api/admin/users/${userId}`, {
                 method: 'PUT',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    role: newRole,
-                }),
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role: newRole }),
             });
-            
-            if (response.ok) {
-                alert('User role updated successfully');
-                fetchData(); // Refresh data
-            } else {
-                const errorData = await response.json();
-                alert(`Error: ${errorData.detail || 'Failed to update role'}`);
-            }
-        } catch (err) {
-            alert('Failed to update user role');
+
+            alert('User role updated successfully');
+            fetchData();
+        } catch (err: any) {
+            alert(`Error: ${err.message}`);
             console.error(err);
         }
     };
@@ -115,26 +73,16 @@ const AdminPage = () => {
         if (!window.confirm(`Are you sure you want to deactivate user ${userEmail}?`)) {
             return;
         }
-        
+
         try {
-            const token = localStorage.getItem('token');
-            
-            const response = await fetch(`/api/admin/users/${userId}`, {
+            await apiRequest(`/api/admin/users/${userId}`, {
                 method: 'DELETE',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                },
             });
-            
-            if (response.ok) {
-                alert('User deactivated successfully');
-                fetchData(); // Refresh data
-            } else {
-                const errorData = await response.json();
-                alert(`Error: ${errorData.detail || 'Failed to deactivate user'}`);
-            }
-        } catch (err) {
-            alert('Failed to deactivate user');
+
+            alert('User deactivated successfully');
+            fetchData();
+        } catch (err: any) {
+            alert(`Error: ${err.message}`);
             console.error(err);
         }
     };

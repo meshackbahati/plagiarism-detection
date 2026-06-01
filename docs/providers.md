@@ -2,272 +2,197 @@
 
 ## Overview
 
-The system supports three AI detection providers. This document compares their characteristics to help you choose the right one for your use case.
+The system supports multiple AI detection approaches. This document compares them to help you choose the right configuration for your use case.
 
 ## Quick Comparison
 
-| Feature | Local Model | OpenAI API | Together API |
-|---------|------------|------------|--------------|
-| **Privacy** | ✅ Full | ❌ Data sent externally | ❌ Data sent externally |
-| **Cost** | ✅ Free | 💰 ~$0.002/request | 💰 ~$0.001/request |
-| **Speed** | ✅ Fast (local) | ⚡ Very fast (API) | ⚡ Very fast (API) |
-| **Accuracy** | ⭐⭐⭐⭐ ~85% | ⭐⭐⭐⭐⭐ ~90% | ⭐⭐⭐⭐ ~88% |
-| **Setup** | ✅ Zero config | 🔑 Requires API key | 🔑 Requires API key |
-| **Dependencies** | 📦 transformers, torch | 📦 openai SDK | 📦 openai SDK |
-| **Model Age** | Trained on GPT-2/3 | Current GPT models | Open-source models |
+| Feature | Statistical Heuristics | Local Model | OpenAI API | Together API |
+|---------|----------------------|------------|------------|--------------|
+| **Privacy** | Full | Full | Data sent externally | Data sent externally |
+| **Cost** | Free | Free | ~$0.00015/request | ~$0.001/request |
+| **Speed** | Instant | Fast (local) | Network-dependent | Network-dependent |
+| **RAM Required** | None | ~500MB | None | None |
+| **Accuracy** | Basic (~70%) | Good (~85%) | Good (~90%) | Good (~88%) |
+| **Setup** | Zero config | Zero config | API key required | API key required |
+| **Reliability** | Always available | Model-dependent | API-dependent | API-dependent |
 
-## Detailed Breakdown
+## Detection Approaches
+
+### Statistical Heuristics (Built-In, Always Available)
+
+**Not a provider** -- this runs alongside every detection method as a baseline signal.
+
+**Signals analyzed:**
+- Burstiness (sentence length variance)
+- Vocabulary diversity (type-token ratio)
+- Sentence length uniformity
+- Word frequency distribution (Zipf's law)
+
+**Characteristics:**
+- Zero dependencies, runs on any machine
+- No model download required
+- Works in `LIGHTWEIGHT_MODE=true`
+- Less accurate than ML models alone
+- Blended with other signals: 30% weight for local detection, 25% for external APIs
 
 ### Local Model (Recommended Default)
 
-**Model:** `roberta-base-openai-detector`
+**Model:** `roberta-base-openai-detector` (~500MB)
 
-#### Pros
-- **Privacy-First:** Text never leaves your infrastructure
-- **No Rate Limits:** Unlimited usage
-- **Offline Capable:** Works without internet
-- **Free:** No API costs
-- **Fast:** ~100 texts/second on CPU
+**How it works:**
+- Chunks text into 512-character segments (max 20)
+- Classifies each chunk as "Real" (human) or "Fake" (AI)
+- Averages chunk scores, blends with heuristics (70% model / 30% heuristic)
+- Model auto-unloads after idle timeout to free memory
 
-#### Cons
-- **Lower Accuracy:** ~85% on GPT-3.5+ text
-- **Model Age:** Trained on older AI models
-- **Resource Usage:** Requires ~500MB RAM per worker
+**Pros:**
+- Full privacy -- text never leaves your server
+- No API costs, no rate limits
+- Works offline
 
-#### Best For
-- Privacy-sensitive environments (GDPR, FERPA compliance)
-- High-volume processing
-- Cost-constrained deployments
-- Offline or air-gapped systems
+**Cons:**
+- ~500MB RAM required
+- Trained on GPT-2/early GPT-3 outputs (may underperform on newer models)
+- First request triggers model download/loading
 
-#### Configuration
+**Best for:** Privacy-sensitive environments, high-volume processing, offline systems
 
+**Configuration:**
 ```bash
-# No configuration needed, works out of the box
-# Model downloads automatically on first use (~500MB)
+# Default -- no configuration needed
+LIGHTWEIGHT_MODE=false
 ```
-
----
 
 ### OpenAI API
 
-**Model:** GPT-3.5-turbo (classifier mode)
+**Model:** `gpt-4o-mini`
 
-#### Pros
-- **Highest Accuracy:** ~90% on modern AI text
-- **Self-Supervised:** GPT detecting GPT
-- **Zero Local Resources:** Minimal memory footprint
-- **Always Updated:** Benefits from OpenAI model improvements
+**How it works:**
+- Sends text with a structural analysis prompt
+- Model evaluates uniformity, predictability, and formality
+- Score blended 75% API + 25% local heuristics
 
-#### Cons
-- **Privacy Concerns:** Text sent to OpenAI servers
-- **API Costs:** ~$0.002 per text analyzed
-- **Rate Limits:** 3,500 requests/min (tier-dependent)
-- **Internet Required:** No offline mode
+**Pros:**
+- Higher accuracy on modern AI text
+- Minimal local resources
+- Always benefits from model improvements
 
-#### Best For
-- Maximum accuracy requirements
-- Low-volume use cases
-- Well-funded projects
-- Non-sensitive text
+**Cons:**
+- Text sent to OpenAI servers
+- API costs per request
+- Requires internet and API key
 
-#### Configuration
+**Estimated costs (gpt-4o-mini):**
+- 100 docs/day: ~$0.45/month
+- 1,000 docs/day: ~$4.50/month
+- 10,000 docs/day: ~$45/month
 
+**Configuration:**
 ```bash
-# .env
 OPENAI_API_KEY=sk-your-key-here
 ```
 
-**Estimated Costs:**
-- 100 documents/day: ~$6/month
-- 1,000 documents/day: ~$60/month
-- 10,000 documents/day: ~$600/month
-
----
-
 ### Together API
 
-**Model:** Mixtral-8x7B-Instruct
+**Model:** `mistralai/Mixtral-8x7B-Instruct-v0.1`
 
-#### Pros
-- **Open-Source Model:** Transparent architecture
-- **Lower Cost:** ~50% cheaper than OpenAI
-- **Good Accuracy:** ~88% on modern AI text
-- **Faster:** Often lower latency than OpenAI
+**How it works:** Same structural analysis approach as OpenAI, using Mixtral via Together's platform.
 
-#### Cons
-- **Privacy Concerns:** Text sent to Together AI servers
-- **API Dependency:** Requires internet
-- **Less Established:** Newer provider vs OpenAI
+**Pros:**
+- Open-source model (transparent architecture)
+- Lower cost than OpenAI
+- Good accuracy
 
-#### Best For
-- Cost-conscious external API usage
-- Open-source preference
-- Good accuracy without OpenAI pricing
+**Cons:**
+- Text sent to Together AI servers
+- Requires internet and API key
+- Less established provider
 
-#### Configuration
-
+**Configuration:**
 ```bash
-# .env
 TOGETHER_API_KEY=your-together-key-here
 ```
 
-**Estimated Costs:**
-- 100 documents/day: ~$3/month
-- 1,000 documents/day: ~$30/month
-- 10,000 documents/day: ~$300/month
+## Choosing a Configuration
 
-## Provider Selection Strategy
-
-### Decision Tree
+### Decision Guide
 
 ```
-Start
-  │
-  ├─ Privacy Required? ──YES──> Local Model
-  │
-  ├─ Budget < $50/mo? ──YES──> Local Model or Together
-  │
-  ├─ Need >90% accuracy? ──YES──> OpenAI API
-  │
-  └─ Default ──────────────────> Local Model
+Is privacy required?
+  YES → Local Model (default)
+  NO  → Is budget constrained?
+         YES → Together API
+         NO  → OpenAI API (highest accuracy)
+
+Is the machine low-resource (<4GB RAM)?
+  YES → LIGHTWEIGHT_MODE=true + external API key
+  NO  → Default (local model + heuristics)
 ```
 
-### Use Case Recommendations
+### Recommended Configurations
 
-#### Academic Institution (K-12)
-- **Primary:** Local Model
-- **Reason:** FERPA compliance, student privacy, cost
-
-#### University Research
-- **Primary:** Together API
-- **Fallback:** Local Model
-- **Reason:** Balance of accuracy and cost
-
-#### Enterprise Compliance
-- **Primary:** Local Model (on-premise)
-- **Reason:** Data sovereignty, audit requirements
-
-#### Startup/Small Business
-- **Primary:** Together API
-- **Reason:** No infrastructure overhead, good accuracy/cost ratio
-
-#### High-Stakes Assessment
-- **Primary:** OpenAI API
-- **Secondary:** Manual review
-- **Reason:** Maximum accuracy, human oversight
-
-## Multi-Provider Strategy
-
-### Ensemble Detection
-
-**Approach:** Run multiple providers and compare results
-
-```python
-local_result = detect(text, provider="local")
-openai_result = detect(text, provider="openai")
-
-if abs(local_result.score - openai_result.score) > 0.3:
-    # Disagreement → flag for manual review
-    flag_for_review()
-else:
-    # Consensus → higher confidence
-    final_score = mean([local_result.score, openai_result.score])
+#### Low-Resource Machine (VPS, Raspberry Pi, etc.)
+```bash
+LIGHTWEIGHT_MODE=true
+OPENAI_API_KEY=sk-your-key   # Optional: for ML-based detection
 ```
+- No ML models loaded (~580MB saved)
+- Statistical heuristics handle local detection
+- External API available for higher accuracy when needed
 
-**Benefits:**
-- Increased confidence
-- Reduces false positives
-- Catches edge cases
-
-**Drawbacks:**
-- 2x cost (if using paid APIs)
-- Slower (sequential calls)
-
-### Tiered Detection
-
-**Approach:** Cheap first-pass, expensive confirmation
-
-```python
-# Step 1: Local model (fast, free)
-local_score = detect(text, provider="local")
-
-# Step 2: If uncertain, use premium API
-if 0.4 < local_score < 0.6:
-    final_score = detect(text, provider="openai")
-else:
-    final_score = local_score
+#### Privacy-First (Air-Gapped, GDPR, FERPA)
+```bash
+LIGHTWEIGHT_MODE=false
+# No API keys configured
 ```
+- Full local processing
+- No data leaves the server
+- ML model + heuristics combined
 
-**Benefits:**
-- Cost optimization (only pay for uncertain cases)
-- Fast for clear-cut cases
-- Best of both worlds
-
-## Technical Implementation
-
-### Switching Providers
-
-**Frontend (User Selection):**
-```tsx
-<select value={provider} onChange={(e) => setProvider(e.target.value)}>
-  <option value="local">Local Model (Free)</option>
-  <option value="openai">OpenAI (Premium)</option>
-  <option value="together">Together AI (Mid-tier)</option>
-</select>
+#### Maximum Accuracy
+```bash
+LIGHTWEIGHT_MODE=false
+OPENAI_API_KEY=sk-your-key
 ```
+- Local model for initial screening
+- OpenAI available for uncertain cases
+- Heuristics as additional signal layer
 
-**Backend (Provider Router):**
-```python
-from app.core.provider_router import ProviderRouter
-
-router = ProviderRouter()
-validated_provider = router.validate_provider(user_choice)
-# Explicit validation, no silent fallbacks
+#### High-Volume / Cost-Constrained
+```bash
+LIGHTWEIGHT_MODE=false
+TOGETHER_API_KEY=your-key
 ```
+- Local model handles most documents
+- Together API for edge cases
+- Lower API costs than OpenAI
 
-### Error Handling
+## Model Lifecycle Management
 
-**Local Model Failure:**
-```python
-try:
-    result = detect(text, provider="local")
-except ModelNotLoadedError:
-    return {"error": "Local model not available, choose external provider"}
-```
+The local ML models are managed by a shared `ModelManager` singleton:
 
-**API Failure:**
-```python
-try:
-    result = detect(text, provider="openai")
-except APIKeyMissingError:
-    return {"error": "OpenAI API key not configured"}
-except RateLimitError:
-    return {"error": "API rate limit exceeded, try again later"}
-```
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `LIGHTWEIGHT_MODE` | `false` | Skip loading all local models |
+| `MODEL_UNLOAD_TIMEOUT` | `300` | Seconds idle before auto-unload |
 
-## Cost Optimization Tips
+**Memory usage:**
+- Embedding model (sentence-transformers): ~80MB
+- AI classifier (roberta): ~500MB
+- Total when both loaded: ~580MB
 
-1. **Batch Processing:** Group multiple texts per API call (if provider supports)
-2. **Caching:** Store results, avoid re-analyzing same text
-3. **Thresholds:** Only use premium API for high-risk scenarios
-4. **Hybrid Strategy:** Local for bulk, API for spot-checks
+**Auto-unload behavior:**
+- After `MODEL_UNLOAD_TIMEOUT` seconds without a detection request, models are unloaded from memory
+- `gc.collect()` runs to release RAM
+- Models reload automatically on next request
+- Set to `0` to disable auto-unload (models stay in memory permanently)
 
-## Future Provider Additions
+## Error Handling
 
-**Planned:**
-- Anthropic Claude API
-- Google Gemini API
-- Custom Self-Hosted Models
-
-**Criteria for Addition:**
-- Documented accuracy benchmarks
-- Reasonable pricing
-- API stability
-- User demand
-
-## References
-
-- [OpenAI Pricing](https://openai.com/pricing)
-- [Together AI Pricing](https://www.together.ai/pricing)
-- [RoBERTa GPT-2 Detector](https://huggingface.co/roberta-base-openai-detector)
+| Scenario | Behavior |
+|----------|----------|
+| Local model fails to load | Falls back to heuristics-only with warning in response |
+| API key missing | Returns explicit error: "OPENAI_API_KEY is not set" |
+| API rate limited | Returns error with retry suggestion |
+| Text too short (< 10 words) | Returns 400 error: insufficient text |
+| `LIGHTWEIGHT_MODE=true` + no API key | Heuristics-only detection (less reliable) |

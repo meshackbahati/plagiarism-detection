@@ -2,217 +2,280 @@
 
 ## Overview
 
-This plagiarism and AI-generated content detection system is built with a **production-grade, auditable architecture** that supports multiple inference backends with explicit provider selection.
+A plagiarism and AI content detection system designed for local deployment. Uses Docker Compose to orchestrate 6 containers (7 with optional celery-beat) with explicit resource limits.
 
 ## High-Level Architecture
 
 ```
 ┌─────────────────┐
-│  React Frontend │ (Vite, TypeScript, TailwindCSS)
+│  React Frontend │  Vite, TypeScript, TailwindCSS
+│  (nginx :80)    │  Serves SPA + proxies /api/ to backend
 └────────┬────────┘
          │ HTTP/REST
          ▼
 ┌─────────────────┐
-│  FastAPI Backend│ (Python 3.11+, Async)
-└────────┬────────┘
-         │
-    ┌────┴─────────────────┬───────────────┬──────────────┐
-    ▼                      ▼               ▼              ▼
-┌─────────┐          ┌──────────┐    ┌─────────┐   ┌──────────┐
-│PostgreSQL│          │  Redis   │    │  MinIO  │   │ External │
-│+pgvector │          │(Celery)  │    │(Storage)│   │   APIs   │
-└──────────┘          └──────────┘    └─────────┘   └──────────┘
-                                                     OpenAI/Together
+│  FastAPI :8000  │  Python 3.11+, async, Gunicorn + Uvicorn workers
+└───┬────┬────┬───┘
+    │    │    │
+    ▼    ▼    ▼
+┌──────┐ ┌──────┐ ┌─────────┐
+│Pg+   │ │Redis │ │MinIO    │
+│vector│ │      │ │(S3)     │
+└──────┘ └──┬───┘ └─────────┘
+            │
+            ▼
+     ┌──────────────┐
+     │ Celery Worker │  Async batch processing
+     │ (1 process)   │  ML models loaded lazily
+     └──────────────┘
+
+External (optional):
+  OpenAI API  │  Together AI API
 ```
+
+## Container Resources
+
+| Container | Image | Memory Limit | Purpose |
+|-----------|-------|-------------|---------|
+| `db` | ankane/pgvector:v0.5.1 | 1GB | PostgreSQL + vector extension |
+| `redis` | redis:7-alpine | 256MB | Celery broker + result backend |
+| `minio` | minio/minio | 512MB | S3-compatible file storage |
+| `frontend` | nginx | 128MB | React SPA + reverse proxy |
+| `api` | Custom (FastAPI) | 2GB | REST API + text extraction |
+| `celery-worker` | Custom (Celery) | 3GB | Async ML processing |
+| `celery-beat` | Custom (Celery) | 128MB | Scheduled tasks (optional, `--profile scheduled`) |
 
 ## Core Components
 
-### 1. Provider Router (`app/core/provider_router.py`)
+### 1. Model Manager (`app/core/model_manager.py`)
 
-**Responsibility:** Central routing logic for AI detection inference.
+Thread-safe singleton that manages ML model lifecycle:
 
-- **Validates** provider availability (API keys, local model status)
-- **Routes** requests to Local/OpenAI/Together backends
-- **Logs** all provider usage for audit trails
-- **Fails explicitly** when provider is misconfigured
-
-**Design Principles:**
-- No silent fallbacks
-- No implicit provider switching
-- All decisions are logged and traceable
-
-### 2. AI Detection Service (`app/services/ai_detection.py`)
-
-**Capabilities:**
-- **Local Model**: HuggingFace Transformers (`roberta-base-openai-detector`)
-- **OpenAI API**: GPT-3.5-turbo for classification
-- **Together API**: Mixtral-8x7B for classification
-
-**Output Schema:**
-```python
-{
-    "is_ai": bool,
-    "score": float,        # 0.0 (Human) to 1.0 (AI)
-    "confidence": float,   # Distance from threshold
-    "label": str,          # "Likely AI" | "Likely Human"
-    "provider": str,       # "local" | "openai" | "together"
-    "details": dict        # Provider-specific metadata
-}
+```
+ModelManager (singleton)
+├── embedding_model      # sentence-transformers/all-MiniLM-L6-v2 (~80MB)
+│   ├── Lazy-loaded on first access
+│   ├── Shared across all EmbeddingService instances
+│   └── Auto-unloaded after idle timeout
+│
+└── ai_classifier        # roberta-base-openai-detector (~500MB)
+    ├── Lazy-loaded on first access
+    ├── Shared across all AIDetectionService instances
+    └── Auto-unloaded after idle timeout
 ```
 
-**Calibration:**
-- Confidence calculated as `abs(score - 0.5) * 2` (0-1 range)
-- Chunks limited to 20 to prevent OOM
-- External APIs receive truncated text (4000 chars)
+**Configuration:**
+- `LIGHTWEIGHT_MODE=true` -- No models loaded at all
+- `MODEL_UNLOAD_TIMEOUT=300` -- Seconds idle before auto-unload (0 = disabled)
 
-### 3. Plagiarism Service (`app/services/plagiarism.py`)
+### 2. Provider Router (`app/core/provider_router.py`)
 
-**Algorithm:**
-1. **Chunking:** Split documents into overlapping chunks (500 chars, 50 overlap)
-2. **Embedding:** Generate SBERT embeddings for each chunk
-3. **Comparison:** O(N*M) chunk-to-chunk similarity via cosine distance
-4. **Aggregation:** Sum matched chunk scores / total chunks in source
+Routes AI detection requests to Local/OpenAI/Together backends:
+- Validates provider availability (API keys, model status)
+- Fails explicitly when provider is misconfigured (no silent fallbacks)
+- Logs all provider usage
 
-**Output Schema:**
-```python
-{
-    "score": float,           # Overall plagiarism score
-    "matches": [              # Detailed chunk matches
-        {
-            "source_chunk": str,
-            "target_chunk": str,
-            "score": float,
-            "source_index": int,
-            "target_index": int
-        }
-    ],
-    "details": {
-        "chunks_a": int,
-        "chunks_b": int
-    }
-}
-```
+### 3. AI Detection Service (`app/services/ai_detection.py`)
 
-**Threshold:** Chunks with >0.75 similarity are considered matches.
+Hybrid detection combining:
+- **Local model** (when available): HuggingFace classifier, chunked inference
+- **Statistical heuristics** (always available): Burstiness, vocabulary, uniformity, Zipf's law
+- **External APIs** (when configured): GPT-4o-mini or Mixtral-8x7B
 
-### 4. API Design (V1)
+Scoring: 70% model + 30% heuristics (local), 75% API + 25% heuristics (external).
 
-**Endpoints:**
+### 4. Embedding Service (`app/services/embedding.py`)
+
+Generates Sentence-BERT embeddings via the shared `ModelManager`:
+- Chunks text into 500-char segments with 50-char overlap
+- Encodes each chunk into a 384-dimensional vector
+- Averages chunk embeddings for document-level embedding
+
+### 5. Plagiarism Service (`app/services/plagiarism.py`)
+
+Two-phase comparison pipeline:
+
+**Phase 1 -- Pre-compute:** All documents encoded once, cached in memory.
+
+**Phase 2 -- Compare:** Pairwise comparison using cached embeddings with vectorized numpy operations. Each chunk in doc A compared against all chunks in doc B via matrix multiply.
+
+**Cross-batch search:** Document-level embeddings queried against all stored documents via pgvector cosine distance (`<=>` operator).
+
+### 6. API Endpoints
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/v1/analyze` | POST | Unified analysis (files/text) |
-| `/v1/ai-detection` | POST | Direct AI check for text |
-| `/v1/batches/{id}/results` | GET | Detailed batch results |
+| `/api/v1/analyze` | POST | Upload files/text for batch analysis |
+| `/api/v1/ai-detection` | POST | Direct AI detection on text (min 10 words) |
+| `/api/v1/ai-detection/health` | GET | Service status + model status |
+| `/api/v1/batches` | GET | List batches (paginated, newest first) |
+| `/api/v1/batches/{id}/results` | GET | Detailed results with AI scores + plagiarism matches |
+| `/api/v1/batches/{id}/export/csv` | GET | CSV report with plagiarism data from stored Comparisons |
+| `/api/v1/batches/{id}/export/pdf` | GET | PDF report with AI + plagiarism tables |
+| `/api/v1/users/me/dashboard` | GET | Dashboard metrics (batch count, doc count) |
+| `/health` | GET | API health check |
 
-**Request Flow:**
-1. User uploads files + selects provider/options
-2. Files → MinIO storage
-3. Batch → PostgreSQL (queued)
-4. Celery task → background processing
-5. Results → PostgreSQL (with JSONB details)
-6. Frontend polls for results
+**Request flow for `/api/v1/analyze`:**
+1. Validate file sizes (max 200MB) and sanitize filenames
+2. Detect archives (ZIP/TAR) -- extract and process inner files individually
+3. Store files in MinIO/S3 (or local filesystem)
+4. Extract text: PDFMiner for PDFs, python-docx for DOCX, Tesseract OCR for images/scanned PDFs
+5. Create Batch + Document records in PostgreSQL
+6. Send Celery task for async processing
+7. Return batch_id immediately
 
-### 5. Database Schema
+### 7. Batch Processing (`app/services/batch_processing.py`)
 
-**Key Tables:**
+Celery task that runs asynchronously:
+
+```
+process_batch(batch_id, provider, ai_threshold)
+│
+├── Phase 1: Pre-compute embeddings for all documents
+│   ├── Encode chunks (once per document)
+│   ├── Cache in PlagiarismService._embedding_cache
+│   └── Store document-level embedding in DB
+│
+├── Phase 2: Process each document
+│   ├── AI detection (if analysis_type includes AI)
+│   │   ├── Store score, label, confidence on Document
+│   │   └── Store detailed result in AIDetection table
+│   │
+│   ├── Within-batch plagiarism (if analysis_type includes plagiarism)
+│   │   ├── Compare against all other docs in batch (cached)
+│   │   └── Store Comparison records
+│   │
+│   ├── Cross-batch plagiarism
+│   │   ├── pgvector similarity search against all stored docs
+│   │   └── Store cross-batch Comparison records
+│   │
+│   └── Error handling: session rollback, doc marked "failed"
+│
+├── Update batch status: completed / completed_with_errors / failed
+└── Clear embedding cache
+```
+
+**Worker configuration:**
+- `--concurrency=1` -- One task at a time (ML models are memory-heavy)
+- `worker_max_tasks_per_child=5` -- Restart after 5 tasks (prevents memory leaks)
+- `worker_prefetch_multiplier=1` -- Don't grab extra tasks while busy
+- `task_acks_late=True` -- Re-queue on failure
+
+## Database Schema
 
 ```sql
+-- Users
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    email VARCHAR UNIQUE NOT NULL,
+    hashed_password VARCHAR NOT NULL,
+    role VARCHAR DEFAULT 'user',
+    is_active BOOLEAN DEFAULT true
+);
+
 -- Batches
 CREATE TABLE batches (
     id UUID PRIMARY KEY,
-    user_id UUID NOT NULL,
+    user_id UUID REFERENCES users(id),  -- indexed
     total_docs INT,
-    status VARCHAR(50),
-    analysis_type VARCHAR(50)
+    processed_docs INT DEFAULT 0,
+    status VARCHAR(50),                  -- queued/processing/completed/completed_with_errors/failed
+    analysis_type VARCHAR(50),           -- plagiarism/ai/both
+    ai_provider VARCHAR(50),
+    ai_threshold FLOAT DEFAULT 0.5,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- Documents
 CREATE TABLE documents (
     id UUID PRIMARY KEY,
-    batch_id UUID REFERENCES batches(id),
-    filename VARCHAR(255),
+    batch_id UUID REFERENCES batches(id),  -- indexed
+    filename VARCHAR NOT NULL,
     text_content TEXT,
-    embedding VECTOR(384),  -- SBERT embedding
+    embedding VECTOR(384),                 -- SBERT document-level embedding
+    status VARCHAR(50) DEFAULT 'queued',   -- indexed
     ai_score FLOAT,
-    is_ai_generated BOOLEAN
+    is_ai_generated BOOLEAN,
+    ai_confidence FLOAT,
+    ai_provider VARCHAR,
+    storage_path VARCHAR,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Comparisons
+-- Comparisons (plagiarism matches)
 CREATE TABLE comparisons (
     id UUID PRIMARY KEY,
-    doc_a UUID REFERENCES documents(id),
-    doc_b UUID REFERENCES documents(id),
-    similarity FLOAT,
-    matches JSON  -- Detailed chunk matches
+    doc_a UUID REFERENCES documents(id),   -- indexed
+    doc_b UUID REFERENCES documents(id),   -- indexed
+    similarity FLOAT NOT NULL,
+    matches JSON,                          -- chunk match details
+    created_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- AI Detection (detailed results)
+CREATE TABLE ai_detection (
+    id UUID PRIMARY KEY,
+    document_id UUID REFERENCES documents(id),  -- indexed
+    model_version VARCHAR,
+    probability FLOAT,
+    meta_data JSONB,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Additional tables (registered but not actively used in processing):
+-- embeddings: Per-chunk embedding storage (file_id indexed)
+-- results: Generic result storage (file_id, matched_file_id indexed)
+-- tasks: Async task tracking
 ```
 
-## Security Considerations
+## Security
 
-### Current Implementation
-✅ JWT-based authentication  
-✅ User-scoped batch access  
-✅ Provider validation  
-✅ Explicit API key checks  
-
-### Missing (Production TODO)
-⚠️ Rate limiting on analysis endpoints  
-⚠️ File size/type validation (implemented but not strict)  
-⚠️ CSRF protection  
-⚠️ Input sanitization for text fields  
-
-## Scalability
-
-### Current Bottlenecks
-1. **Batch Processing:** O(N²) comparison within batch
-2. **Embeddings:** Sequential chunk encoding
-3. **Database:** No pagination on results endpoint
-
-### Scaling Strategies
-1. **Use FAISS** or pgvector for chunk similarity search (vs brute-force)
-2. **Batch encode** chunks in parallel (GPU acceleration)
-3. **Implement pagination** with cursor-based results
-4. **Horizontal Celery workers** for concurrent batch processing
+**Implemented:**
+- JWT-based authentication with configurable secret key
+- User-scoped batch access (users can only see their own batches)
+- File size validation (200MB limit, enforced server-side and client-side)
+- Filename sanitization (path traversal protection via `os.path.basename`)
+- Archive extraction with zip-slip protection (validates paths don't escape extraction directory)
+- Provider validation (explicit API key checks, no silent fallbacks)
+- nginx `client_max_body_size` prevents large payload attacks
 
 ## Technology Stack
 
-| Layer | Technology | Version |
-|-------|-----------|---------|
-| Frontend | React | 18.2 |
-| Build Tool | Vite | 5.0 |
-| Styling | TailwindCSS | 4.1 |
-| Backend | FastAPI | 0.111+ |
-| Database | PostgreSQL | 15 |
-| Vector Extension | pgvector | 0.2 |
-| Task Queue | Celery | 5.3 |
-| Cache/Broker | Redis | 5.0 |
-| Storage | MinIO | 7.1 |
-| ML Framework | Transformers | 4.35+ |
-| Embeddings | Sentence-Transformers | 2.2+ |
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 18, TypeScript, Vite 5, TailwindCSS 4 |
+| Backend | FastAPI, Gunicorn, Uvicorn |
+| Database | PostgreSQL 15 + pgvector 0.5 |
+| Task Queue | Celery 5 + Redis 7 |
+| Storage | MinIO (S3-compatible) |
+| ML: Embeddings | sentence-transformers/all-MiniLM-L6-v2 |
+| ML: AI Detection | roberta-base-openai-detector |
+| ML: OCR | Tesseract (pytesseract + pdf2image) |
+| ML: PDF | PDFMiner |
+| ML: DOCX | python-docx |
+| Reverse Proxy | nginx |
+| Containerization | Docker Compose |
 
-## Deployment Architecture
+## Deployment
 
-### Development
+### Standard (default)
+```bash
+docker compose up -d
 ```
-docker-compose up --build
+Starts all services except celery-beat.
+
+### With scheduled tasks
+```bash
+docker compose --profile scheduled up -d
 ```
+Includes celery-beat (currently no scheduled tasks defined).
 
-### Production (Recommended)
-- **Frontend:** Vercel/Netlify (static hosting)
-- **Backend:** Kubernetes with auto-scaling
-- **Database:** Managed PostgreSQL (AWS RDS, Google Cloud SQL)
-- **Storage:** S3-compatible object storage
-- **Workers:** Celery on dedicated pods with GPU
+### Lightweight (low-resource)
+```bash
+# In backend/.env.docker:
+LIGHTWEIGHT_MODE=true
+OPENAI_API_KEY=sk-your-key  # Optional
 
-## Monitoring & Observability
-
-**Implemented:**
-- Structured logging via `loguru`
-- Prometheus metrics endpoint
-- Provider usage logging
-
-**Recommended:**
-- Sentry for error tracking
-- Grafana dashboards for metrics
-- OpenTelemetry for distributed tracing
+docker compose up -d
+```
+Skips ML model loading, uses heuristics + external APIs.
