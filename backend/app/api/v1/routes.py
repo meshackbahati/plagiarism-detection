@@ -1,23 +1,32 @@
 import asyncio
+import hashlib
+import logging
+import mimetypes
 import os
 import uuid
 import json
-from io import BytesIO
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Body
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Body, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, or_, delete as sa_delete
 from sqlalchemy.orm import aliased
 
 from app.core.db import get_db
 from app.models.user import User
-from app.models import Batch, Document, Comparison
+from app.models import AIDetection, Batch, Comparison, Document, Embedding, Result
 from app.api.auth import get_current_user
 from app.services.report import ReportService
-from app.core.provider_router import ProviderType
+from app.core.config import settings
+from app.core.provider_router import ProviderRouter, ProviderType
+from app.services.archive_extractor import ArchiveError, ArchiveExtractor
+from app.services.batch_processing import process_batch
+from app.services.parsing import DOCUMENT_EXTENSIONS, ExtractionError, extract_text_from_bytes
+from app.services.storage import StorageService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -34,26 +43,20 @@ def _get_ai_service():
     return _ai_service
 
 
-# File size limit: 200MB
-MAX_FILE_SIZE = 200 * 1024 * 1024
+MAX_FILE_SIZE = settings.MAX_UPLOAD_BYTES
 
-# Allowed file extensions
-ALLOWED_EXTENSIONS = {
-    '.pdf', '.docx', '.txt', '.png', '.jpg', '.jpeg',
-    '.zip', '.tar', '.tar.gz', '.tgz',
-}
+ARCHIVE_EXTENSIONS = {'.zip', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2'}
+ALLOWED_EXTENSIONS = DOCUMENT_EXTENSIONS | ARCHIVE_EXTENSIONS
 
 
 def _sanitize_filename(filename: str) -> str:
-    """Remove path traversal and null bytes from user-supplied filenames."""
-    # Strip directory components (handles both / and \)
+    """Remove path components, control characters and odd whitespace from a user-supplied name."""
+    filename = filename.replace("\\", "/")
     filename = os.path.basename(filename)
-    # Remove null bytes
-    filename = filename.replace('\x00', '')
-    # Reject empty filenames
+    filename = "".join(ch for ch in filename if ch.isprintable()).strip()
     if not filename or filename in ('.', '..'):
         filename = 'unnamed_file'
-    return filename
+    return filename[:200]
 
 
 class AnalysisOptions(BaseModel):
@@ -67,6 +70,41 @@ class AnalysisResponse(BaseModel):
     batch_id: str
     status: str
     message: str
+    documents: int = 0
+    failed_documents: int = 0
+    skipped: List[str] = []
+
+
+def _new_document(batch_id, display_name: str, content: bytes) -> Document:
+    doc_id = uuid.uuid4()
+    return Document(
+        id=doc_id,
+        batch_id=batch_id,
+        filename=display_name[:255],
+        # doc id prefix: two files with the same name never overwrite each other
+        storage_path=f"{batch_id}/{doc_id}_{_sanitize_filename(display_name)}",
+        content_hash=hashlib.sha256(content).hexdigest() if content else None,
+        mime_type=mimetypes.guess_type(display_name)[0],
+        status="queued",
+    )
+
+
+async def _fill_text(doc: Document, content: bytes, filename: str) -> None:
+    """Extract text into doc, or mark it failed with a readable reason."""
+    try:
+        result = await asyncio.to_thread(extract_text_from_bytes, content, filename)
+    except ExtractionError as exc:
+        doc.status, doc.error = "failed", str(exc)
+        return
+    except Exception as exc:  # never let one file sink the whole upload
+        logger.exception("Extraction crashed for %s", filename)
+        doc.status, doc.error = "failed", f"Could not read this file ({exc.__class__.__name__})."
+        return
+    doc.text_content = result.text
+    doc.word_count = len(result.text.split())
+    doc.extraction_method = result.method
+    if result.warnings:
+        doc.error = " ".join(result.warnings)  # informational; status stays queued
 
 
 @router.post("/analyze", response_model=AnalysisResponse)
@@ -80,151 +118,136 @@ async def analyze_content(
     """
     Unified endpoint for analyzing content (files or text).
     Supports Plagiarism and AI Detection with configurable providers.
+    Unreadable files are recorded as failed documents with a reason instead
+    of failing the whole upload.
     """
     try:
-        parsed_options = json.loads(options)
-        opts = AnalysisOptions(**parsed_options)
+        opts = AnalysisOptions(**json.loads(options))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid options JSON: {e}")
 
+    if not opts.check_ai and not opts.check_plagiarism:
+        raise HTTPException(status_code=400, detail="Choose at least one check: plagiarism or AI detection.")
+
+    try:
+        ProviderRouter().validate_provider(opts.provider)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    text = (text or "").strip() or None
+    files = [f for f in files if f is not None and f.filename]
     if not files and not text:
         raise HTTPException(status_code=400, detail="Must provide either files or text")
+    if len(files) > settings.MAX_FILES_PER_BATCH:
+        raise HTTPException(status_code=400, detail=f"Too many files (maximum {settings.MAX_FILES_PER_BATCH} per upload).")
 
-    # Validate file sizes before any processing
     for file in files:
-        # Read a byte past the limit to check size without loading entire file
-        file.file.seek(0, 2)  # Seek to end
+        file.file.seek(0, 2)
         size = file.file.tell()
-        file.file.seek(0)  # Reset
+        file.file.seek(0)
         if size > MAX_FILE_SIZE:
             raise HTTPException(
                 status_code=413,
-                detail=f"File '{file.filename}' is too large ({size / 1024 / 1024:.1f}MB). Maximum is 200MB."
+                detail=f"File '{file.filename}' is too large ({size / 1024 / 1024:.1f}MB). Maximum is {MAX_FILE_SIZE // (1024 * 1024)}MB."
+            )
+        name = (file.filename or "").lower()
+        if not any(name.endswith(ext) for ext in ALLOWED_EXTENSIONS):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{file.filename}' is not a supported file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}.",
             )
 
-    # Create Batch
     batch_id = uuid.uuid4()
-    analysis_type = "plagiarism"
-    if opts.check_ai and opts.check_plagiarism:
-        analysis_type = "both"
-    elif opts.check_ai:
-        analysis_type = "ai"
-
+    analysis_type = "both" if (opts.check_ai and opts.check_plagiarism) else ("ai" if opts.check_ai else "plagiarism")
+    first_name = _sanitize_filename(files[0].filename) if files else "Pasted text"
+    item_count = len(files) + (1 if text else 0)
     batch = Batch(
         id=batch_id,
         user_id=user.id,
+        name=first_name if item_count == 1 else f"{first_name} + {item_count - 1} more",
         total_docs=0,
         status="queued",
         analysis_type=analysis_type,
         ai_provider=opts.provider,
-        ai_threshold=opts.ai_threshold
+        ai_threshold=opts.ai_threshold,
     )
     db.add(batch)
 
-    # Process Text Input
-    docs_to_process = []
-    if text:
-        doc = Document(
-            id=uuid.uuid4(),
-            batch_id=batch_id,
-            filename="input_text.txt",
-            storage_path=f"{batch_id}/input_text.txt",
-            text_content=text,
-            status="queued"
-        )
-        db.add(doc)
-        docs_to_process.append(doc)
-
-    # Process Uploaded Files
-    from app.services.parsing import extract_text_from_file
-    from app.services.storage import StorageService
-    from app.services.archive_extractor import ArchiveExtractor
     storage_service = StorageService()
+    docs: List[Document] = []
+    skipped: List[str] = []
 
-    # Extensions for files we can extract text from (excludes archives)
-    DOC_EXTENSIONS = [ext for ext in ALLOWED_EXTENSIONS if ext not in {'.zip', '.tar', '.tar.gz', '.tgz'}]
+    async def store(doc: Document, content: bytes):
+        try:
+            await asyncio.to_thread(storage_service.save, doc.storage_path, content)
+        except Exception as exc:
+            logger.exception("Storage failed for %s", doc.filename)
+            raise HTTPException(status_code=503, detail=f"File storage is unavailable: {exc}")
+
+    if text:
+        content = text.encode("utf-8")
+        doc = _new_document(batch_id, "Pasted text.txt", content)
+        await _fill_text(doc, content, "input.txt")
+        await store(doc, content)
+        docs.append(doc)
 
     for file in files:
         safe_filename = _sanitize_filename(file.filename or 'unnamed_file')
         content = await file.read()
 
-        # Check if this is an archive - if so, extract and process each file inside
         if ArchiveExtractor.is_archive(safe_filename):
-            import tempfile
-            import shutil
-            # Write archive to temp file, extract, then process each inner file
-            with tempfile.NamedTemporaryFile(suffix=os.path.splitext(safe_filename)[1] or '.zip', delete=False) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            extract_dir = None
             try:
-                extracted = await asyncio.to_thread(
-                    ArchiveExtractor.extract_and_filter,
-                    tmp_path,
-                    DOC_EXTENSIONS,
+                members, notes = await asyncio.to_thread(
+                    ArchiveExtractor.read_members, content, safe_filename, DOCUMENT_EXTENSIONS
                 )
-                # Track the extraction directory for cleanup
-                if extracted:
-                    extract_dir = os.path.dirname(extracted[0][1])
-
-                for inner_filename, inner_path in extracted:
-                    inner_safe = _sanitize_filename(inner_filename)
-                    with open(inner_path, 'rb') as f:
-                        inner_content = f.read()
-
-                    inner_storage_path = f"{batch_id}/{inner_safe}"
-                    await asyncio.to_thread(storage_service.save, inner_storage_path, inner_content)
-
-                    file_obj = BytesIO(inner_content)
-                    file_obj.name = inner_safe
-                    text_content = await extract_text_from_file(file_obj, inner_safe)
-
-                    doc = Document(
-                        batch_id=batch_id,
-                        filename=inner_safe,
-                        storage_path=inner_storage_path,
-                        text_content=text_content,
-                        status="queued"
-                    )
-                    db.add(doc)
-                    docs_to_process.append(doc)
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                # Clean up the extraction temp directory
-                if extract_dir and os.path.exists(extract_dir):
-                    shutil.rmtree(extract_dir, ignore_errors=True)
+            except ArchiveError as exc:
+                doc = _new_document(batch_id, safe_filename, content)
+                doc.status, doc.error = "failed", str(exc)
+                docs.append(doc)
+                continue
+            skipped.extend(f"{safe_filename}: {n}" for n in notes)
+            if not members:
+                doc = _new_document(batch_id, safe_filename, content)
+                doc.status, doc.error = "failed", "The archive contains no supported documents."
+                docs.append(doc)
+                continue
+            for member in members:
+                if len(docs) >= settings.MAX_FILES_PER_BATCH:
+                    skipped.append(f"{safe_filename}/{member.name}: batch file limit reached")
+                    continue
+                display = f"{safe_filename}/{member.name}"
+                doc = _new_document(batch_id, display, member.content)
+                await _fill_text(doc, member.content, member.name)
+                await store(doc, member.content)
+                docs.append(doc)
             continue
 
-        # Regular (non-archive) file processing
-        storage_path = f"{batch_id}/{safe_filename}"
-        await asyncio.to_thread(storage_service.save, storage_path, content)
+        doc = _new_document(batch_id, safe_filename, content)
+        await _fill_text(doc, content, safe_filename)
+        await store(doc, content)
+        docs.append(doc)
 
-        file_obj = BytesIO(content)
-        file_obj.name = safe_filename
-        text_content = await extract_text_from_file(file_obj, safe_filename)
-
-        doc = Document(
-            batch_id=batch_id,
-            filename=safe_filename,
-            storage_path=storage_path,
-            text_content=text_content,
-            status="queued"
-        )
+    for doc in docs:
         db.add(doc)
-        docs_to_process.append(doc)
-
-    batch.total_docs = len(docs_to_process)
+    batch.total_docs = len(docs)
     await db.commit()
 
-    # Trigger Processing (Async)
-    from app.services.batch_processing import process_batch
-    process_batch.delay(str(batch_id), provider=opts.provider, ai_threshold=opts.ai_threshold)
+    try:
+        process_batch.delay(str(batch_id), provider=opts.provider, ai_threshold=opts.ai_threshold)
+    except Exception as exc:
+        logger.exception("Could not queue batch %s", batch_id)
+        batch.status, batch.error = "failed", f"Task queue unavailable: {exc}"
+        await db.commit()
+        raise HTTPException(status_code=503, detail="The analysis queue (Redis/Celery) is unavailable. Try again shortly.")
 
+    failed = sum(1 for d in docs if d.status == "failed")
     return AnalysisResponse(
         batch_id=str(batch_id),
         status="queued",
-        message="Analysis started successfully"
+        message="Analysis started successfully" if failed < len(docs) else "None of the files could be read",
+        documents=len(docs),
+        failed_documents=failed,
+        skipped=skipped[:100],
     )
 
 
@@ -255,8 +278,13 @@ async def detect_ai_only(
         raise HTTPException(status_code=400, detail="Text is too short for reliable AI detection (minimum 10 words)")
 
     try:
+        if len(text) > 200_000:
+            raise HTTPException(status_code=400, detail="Text is too long for direct checking (maximum 200,000 characters). Upload it as a file instead.")
+        if not 0.0 <= threshold <= 1.0:
+            raise HTTPException(status_code=400, detail="threshold must be between 0 and 1")
         service = _get_ai_service()
-        ai_result = service.detect(text, provider=provider, threshold=threshold)
+        # Model inference is blocking; keep the event loop free.
+        ai_result = await asyncio.to_thread(service.detect, text, provider, threshold)
 
         if ai_result.get("label") == "Error":
             raise HTTPException(status_code=500, detail=ai_result.get("details", {}).get("error", "AI detection failed"))
@@ -279,40 +307,59 @@ async def detect_ai_only(
 async def list_batches(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ):
     """List all batches for the current user, newest first."""
+    doc_counts = (
+        select(Document.batch_id, func.count(Document.id).label("n"))
+        .group_by(Document.batch_id)
+        .subquery()
+    )
     result = await db.execute(
-        select(Batch)
+        select(Batch, doc_counts.c.n)
+        .outerjoin(doc_counts, doc_counts.c.batch_id == Batch.id)
         .where(Batch.user_id == user.id)
         .order_by(desc(Batch.created_at))
         .limit(limit)
         .offset(offset)
     )
-    batches = result.scalars().all()
-
-    # Get document counts per batch
-    batch_list = []
-    for batch in batches:
-        doc_count = await db.scalar(
-            select(func.count(Document.id)).where(Document.batch_id == batch.id)
-        )
-        batch_list.append({
+    batch_list = [
+        {
             "id": str(batch.id),
+            "name": batch.name,
             "status": batch.status,
             "analysis_type": batch.analysis_type,
             "total_docs": batch.total_docs,
             "processed_docs": batch.processed_docs,
-            "document_count": doc_count or 0,
+            "document_count": n or 0,
+            "error": batch.error,
             "created_at": batch.created_at.isoformat() if batch.created_at else None,
-        })
+        }
+        for batch, n in result.all()
+    ]
 
-    total = await db.scalar(
-        select(func.count(Batch.id)).where(Batch.user_id == user.id)
-    )
-
+    total = await db.scalar(select(func.count(Batch.id)).where(Batch.user_id == user.id))
     return {"status": "ok", "data": batch_list, "total": total or 0}
+
+
+async def _get_user_batch(db: AsyncSession, batch_id: uuid.UUID, user: User) -> Batch:
+    batch = (
+        await db.execute(select(Batch).where(Batch.id == batch_id, Batch.user_id == user.id))
+    ).scalar_one_or_none()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return batch
+
+
+def _public_match(m: dict) -> dict:
+    return {
+        "type": m.get("type", "semantic" if not m.get("cross_batch") else "exact"),
+        "source_chunk": m.get("source_chunk", ""),
+        "target_chunk": m.get("target_chunk", ""),
+        "score": m.get("score", 0.0),
+        "words": m.get("words"),
+    }
 
 
 @router.get("/batches/{batch_id}/results")
@@ -321,84 +368,107 @@ async def get_batch_results(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
-    """
-    Get detailed results for a batch, including AI scores and plagiarism matches.
-    """
-    batch_result = await db.execute(
-        select(Batch).where(Batch.id == batch_id, Batch.user_id == user.id)
-    )
-    batch = batch_result.scalar_one_or_none()
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
-
-    documents_result = await db.execute(
-        select(Document).where(Document.batch_id == batch_id)
-    )
-    documents = documents_result.scalars().all()
+    """Detailed results for a batch: AI scores and plagiarism matches with evidence."""
+    batch = await _get_user_batch(db, batch_id, user)
+    documents = (
+        await db.execute(select(Document).where(Document.batch_id == batch_id).order_by(Document.filename))
+    ).scalars().all()
+    comparisons = await _fetch_comparisons(db, documents)
 
     results = []
     for doc in documents:
-        # Get plagiarism comparisons
-        DocB = aliased(Document)
-        comparisons_result = await db.execute(
-            select(Comparison, DocB.filename.label("match_filename"))
-            .join(DocB, Comparison.doc_b == DocB.id)
-            .where(Comparison.doc_a == doc.id)
-            .order_by(Comparison.similarity.desc())
-        )
-        comparisons = comparisons_result.all()
-
-        plagiarism_details = []
-        for comp, match_filename in comparisons:
-            plagiarism_details.append({
+        plagiarism_details = [
+            {
+                "document_id": str(comp.doc_b),
                 "similar_document": match_filename,
                 "similarity": comp.similarity,
-                "matches": comp.matches or []
-            })
-
+                "lexical_similarity": comp.lexical_similarity,
+                "semantic_similarity": comp.semantic_similarity,
+                "cross_batch": bool(comp.cross_batch),
+                # Old rows stored only metadata ({"cross_batch": true, ...}); drop those.
+                "matches": [_public_match(m) for m in (comp.matches or []) if m.get("source_chunk")],
+            }
+            for comp, match_filename in comparisons.get(doc.id, [])
+        ]
         results.append({
             "document_id": str(doc.id),
             "filename": doc.filename,
             "status": doc.status,
+            "error": doc.error,
+            "word_count": doc.word_count,
+            "extraction_method": doc.extraction_method,
             "ai_analysis": {
                 "score": doc.ai_score,
                 "is_ai": doc.is_ai_generated,
                 "confidence": doc.ai_confidence,
-                "provider": doc.ai_provider
+                "provider": doc.ai_provider,
+                "label": doc.ai_label,
             },
-            "plagiarism_analysis": plagiarism_details
+            "plagiarism_analysis": plagiarism_details,
         })
 
     return {
         "status": "ok",
         "batch": {
             "id": str(batch.id),
+            "name": batch.name,
             "status": batch.status,
             "analysis_type": batch.analysis_type,
             "total_docs": batch.total_docs,
             "processed_docs": batch.processed_docs,
+            "error": batch.error,
+            "created_at": batch.created_at.isoformat() if batch.created_at else None,
         },
         "data": results,
     }
 
 
+@router.delete("/batches/{batch_id}")
+async def delete_batch(
+    batch_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Delete a batch, its documents, results and stored files."""
+    await _get_user_batch(db, batch_id, user)
+    docs = (
+        await db.execute(select(Document.id, Document.storage_path).where(Document.batch_id == batch_id))
+    ).all()
+    doc_ids = [d.id for d in docs]
+    if doc_ids:
+        await db.execute(sa_delete(Comparison).where(or_(Comparison.doc_a.in_(doc_ids), Comparison.doc_b.in_(doc_ids))))
+        await db.execute(sa_delete(AIDetection).where(AIDetection.document_id.in_(doc_ids)))
+        await db.execute(sa_delete(Embedding).where(Embedding.file_id.in_(doc_ids)))
+        await db.execute(sa_delete(Result).where(or_(Result.file_id.in_(doc_ids), Result.matched_file_id.in_(doc_ids))))
+        await db.execute(sa_delete(Document).where(Document.id.in_(doc_ids)))
+    await db.execute(sa_delete(Batch).where(Batch.id == batch_id))
+    await db.commit()
+
+    storage = StorageService()
+    for d in docs:
+        if d.storage_path:
+            try:
+                await asyncio.to_thread(storage.delete, d.storage_path)
+            except Exception:
+                logger.warning("Could not delete stored file %s", d.storage_path)
+    return {"status": "ok", "deleted_documents": len(doc_ids)}
+
+
 async def _fetch_comparisons(db: AsyncSession, documents) -> dict:
-    """
-    Fetch all comparisons for a set of documents.
-    Returns dict mapping doc_id -> list of (Comparison, match_filename) tuples.
-    """
+    """Map doc_id -> list of (Comparison, match_filename), highest similarity first."""
     doc_ids = [doc.id for doc in documents]
     if not doc_ids:
         return {}
 
     DocB = aliased(Document)
-    comp_result = await db.execute(
-        select(Comparison, DocB.filename.label("match_filename"))
-        .join(DocB, Comparison.doc_b == DocB.id)
-        .where(Comparison.doc_a.in_(doc_ids))
-        .order_by(Comparison.similarity.desc())
-    )
-    rows = comp_result.all()
+    rows = (
+        await db.execute(
+            select(Comparison, DocB.filename.label("match_filename"))
+            .join(DocB, Comparison.doc_b == DocB.id)
+            .where(Comparison.doc_a.in_(doc_ids))
+            .order_by(Comparison.similarity.desc())
+        )
+    ).all()
 
     lookup: dict = {doc_id: [] for doc_id in doc_ids}
     for comp, match_filename in rows:
@@ -413,12 +483,7 @@ async def export_batch_pdf(
     user: User = Depends(get_current_user)
 ):
     """Export batch results as PDF"""
-    batch_result = await db.execute(
-        select(Batch).where(Batch.id == batch_id, Batch.user_id == user.id)
-    )
-    batch = batch_result.scalar_one_or_none()
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    batch = await _get_user_batch(db, batch_id, user)
 
     documents_result = await db.execute(
         select(Document).where(Document.batch_id == batch_id)
@@ -444,12 +509,7 @@ async def export_batch_csv(
     user: User = Depends(get_current_user)
 ):
     """Export batch results as CSV"""
-    batch_result = await db.execute(
-        select(Batch).where(Batch.id == batch_id, Batch.user_id == user.id)
-    )
-    batch = batch_result.scalar_one_or_none()
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    batch = await _get_user_batch(db, batch_id, user)
 
     documents_result = await db.execute(
         select(Document).where(Document.batch_id == batch_id)

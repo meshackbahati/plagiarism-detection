@@ -18,6 +18,11 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Canonical Hugging Face ids (the bare "roberta-base-openai-detector" alias
+# depends on a redirect that can disappear).
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+AI_CLASSIFIER_MODEL = os.getenv("AI_CLASSIFIER_MODEL", "openai-community/roberta-base-openai-detector")
+
 
 class ModelManager:
     """
@@ -81,7 +86,7 @@ class ModelManager:
         try:
             from sentence_transformers import SentenceTransformer
             logger.info("Loading embedding model (all-MiniLM-L6-v2)...")
-            self._embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+            self._embedding_model = SentenceTransformer(EMBEDDING_MODEL)
             logger.info("Embedding model loaded (~80MB)")
         except Exception as e:
             logger.error(f"Failed to load embedding model: {e}")
@@ -117,7 +122,9 @@ class ModelManager:
             logger.info("Loading AI classifier (roberta-base-openai-detector)...")
             self._classifier = pipeline(
                 "text-classification",
-                model="roberta-base-openai-detector",
+                model=AI_CLASSIFIER_MODEL,
+                truncation=True,
+                max_length=512,
             )
             logger.info("AI classifier loaded (~500MB)")
         except Exception as e:

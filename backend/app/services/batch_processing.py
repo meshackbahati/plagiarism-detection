@@ -1,176 +1,267 @@
-from app.core.celery import app as celery_app
+"""
+Celery task that analyses one uploaded batch.
+
+Pipeline:
+  1. Profile every readable document once (fingerprint + chunk embeddings)
+     and store a document vector for future cross-batch searches.
+  2. Fetch cross-batch candidates once for the whole batch.
+  3. Per document: AI detection, within-batch comparison, cross-batch
+     comparison, then commit, so progress is visible and one bad document
+     never loses the others' results.
+
+Re-running a batch is safe: old comparisons/AI rows for its documents are
+deleted first.
+"""
+
+import asyncio
+import logging
+from typing import Dict, List
+
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
+
+from app.core.celery import app as celery_app
 from app.core.config import settings
+from app.models.ai_detection import AIDetection
 from app.models.batch import Batch
-from app.models.document import Document
 from app.models.comparison import Comparison
-import asyncio
+from app.models.document import Document
 
-engine = create_async_engine(settings.DATABASE_URL, echo=False)
-SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+logger = logging.getLogger(__name__)
 
 
-@celery_app.task(
-    name='app.services.batch_processing.process_batch',
-    bind=True,
-    max_retries=2,
-    default_retry_delay=30,
-)
+@celery_app.task(name="app.services.batch_processing.process_batch", bind=True)
 def process_batch(self, batch_id: str, provider: str = "local", ai_threshold: float = 0.5):
     """Process a batch of documents for plagiarism and/or AI detection."""
-    asyncio.run(_process_batch_async(batch_id, provider, ai_threshold))
+    try:
+        asyncio.run(_process_batch_async(batch_id, provider, ai_threshold))
+    except Exception as exc:
+        logger.exception("Batch %s crashed", batch_id)
+        asyncio.run(_mark_batch_failed(batch_id, f"Processing crashed: {exc}"))
+        raise
+
+
+def _new_engine():
+    # A fresh engine per task with NullPool: every task runs in its own
+    # asyncio.run() event loop, and pooled asyncpg connections from a
+    # previous loop cannot be reused (they fail with "attached to a
+    # different loop" on the second task in the same worker process).
+    return create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
+
+
+async def _mark_batch_failed(batch_id: str, message: str):
+    engine = _new_engine()
+    try:
+        async with AsyncSession(engine) as session:
+            await session.execute(
+                update(Batch).where(Batch.id == batch_id).values(status="failed", error=message[:2000])
+            )
+            await session.execute(
+                update(Document)
+                .where(Document.batch_id == batch_id, Document.status.in_(["queued", "processing"]))
+                .values(status="failed", error="Batch processing stopped before this document finished.")
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
 
 
 async def _process_batch_async(batch_id: str, provider: str, ai_threshold: float):
-    async with SessionLocal() as session:
-        # Get batch and documents
-        batch = await session.get(Batch, batch_id)
-        if not batch:
-            print(f"Batch {batch_id} not found")
-            return
+    engine = _new_engine()
+    Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with Session() as session:
+            await _run(session, batch_id, provider, ai_threshold)
+    finally:
+        await engine.dispose()
 
-        batch.status = "processing"
-        await session.commit()
 
-        # Get all documents in this batch
-        from sqlalchemy import select
-        result = await session.execute(
-            select(Document).where(Document.batch_id == batch_id)
+async def _run(session: AsyncSession, batch_id: str, provider: str, ai_threshold: float):
+    batch = await session.get(Batch, batch_id)
+    if not batch:
+        logger.warning("Batch %s not found", batch_id)
+        return
+
+    analysis_type = batch.analysis_type or "plagiarism"
+    do_ai = analysis_type in ("ai", "both", "mixed")
+    do_plagiarism = analysis_type in ("plagiarism", "both", "mixed")
+
+    rows = (await session.execute(select(Document).where(Document.batch_id == batch_id))).scalars().all()
+    # Plain snapshots: ORM objects expire on rollback, and lazy reloads are
+    # not allowed in async sessions.
+    docs: List[Dict] = [
+        {
+            "id": d.id,
+            "filename": d.filename,
+            "text": d.text_content or "",
+            "content_hash": d.content_hash,
+            "status": d.status,
+        }
+        for d in rows
+    ]
+    doc_ids = [d["id"] for d in docs]
+
+    # Idempotent re-runs.
+    if doc_ids:
+        await session.execute(
+            delete(Comparison).where(or_(Comparison.doc_a.in_(doc_ids), Comparison.doc_b.in_(doc_ids)))
         )
-        documents = result.scalars().all()
+        await session.execute(delete(AIDetection).where(AIDetection.document_id.in_(doc_ids)))
+    await session.execute(
+        update(Batch).where(Batch.id == batch_id).values(status="processing", processed_docs=0, error=None)
+    )
+    await session.commit()
 
-        analysis_type = batch.analysis_type or "plagiarism"
+    # Documents that already failed at upload (unreadable file) stay failed.
+    pre_failed = [d for d in docs if d["status"] == "failed"]
+    work = [d for d in docs if d["status"] != "failed"]
+    for d in list(work):
+        if not d["text"].strip():
+            await _fail_doc(session, d["id"], "No readable text was found in this file.")
+            pre_failed.append(d)
+            work.remove(d)
 
-        # Use the shared model manager (lazy-loads models on first use)
-        from app.services.embedding import EmbeddingService
-        from app.services.ai_detection import AIDetectionService
+    processed = len(pre_failed)
+    failed = len(pre_failed)
+    await _set_progress(session, batch_id, processed)
+
+    # ── Phase 1: profiles + document vectors ──
+    plagiarism = None
+    profiles = {}
+    candidates = []
+    if do_plagiarism and work:
         from app.services.plagiarism import PlagiarismService
 
-        ai_service = AIDetectionService()
-        embedding_service = EmbeddingService()
-        plagiarism_service = PlagiarismService(session)
-
-        failed_count = 0
-        completed_count = 0
-
-        # ── Phase 1: Pre-compute embeddings for ALL documents ──
-        # This ensures each document is encoded exactly once.
-        if analysis_type in ["plagiarism", "both", "mixed"] and embedding_service.model:
-            for doc in documents:
-                if doc.text_content and doc.text_content.strip():
-                    chunks, embeddings = plagiarism_service.precompute_embeddings(
-                        str(doc.id), doc.text_content
-                    )
-                    # Store document-level embedding for cross-batch search
-                    if embeddings:
-                        import numpy as np
-                        doc.embedding = np.mean(embeddings, axis=0).tolist()
-
-            await session.commit()
-
-        # ── Phase 2: Process each document ──
-        for doc in documents:
+        plagiarism = PlagiarismService(session)
+        vectors = []
+        for d in work:
             try:
-                doc.status = "processing"
-                await session.commit()
-
-                # Check for empty/failed text extraction
-                if not doc.text_content or not doc.text_content.strip():
-                    doc.status = "failed"
-                    failed_count += 1
-                    await session.commit()
-                    print(f"Document {doc.id} ({doc.filename}): text extraction failed (empty content)")
-                    continue
-
-                # AI Detection
-                if analysis_type in ["ai", "both", "mixed"]:
-                    ai_result = ai_service.detect(doc.text_content, provider=provider, threshold=ai_threshold)
-                    doc.ai_score = ai_result.get("score", 0.0)
-                    doc.is_ai_generated = ai_result.get("is_ai", False)
-                    doc.ai_confidence = ai_result.get("confidence", 0.0)
-                    doc.ai_provider = ai_result.get("provider", "unknown")
-
-                    # Store detailed AI detection result
-                    from app.models.ai_detection import AIDetection
-                    ai_detection_record = AIDetection(
-                        document_id=doc.id,
-                        model_version=ai_result.get("details", {}).get("model", "unknown"),
-                        probability=ai_result.get("score", 0.0),
-                        meta_data={
-                            "provider": ai_result.get("provider", "unknown"),
-                            "confidence": ai_result.get("confidence", 0.0),
-                            "label": ai_result.get("label", "unknown"),
-                            "statistics": ai_result.get("details", {}).get("statistics", {}),
-                        },
-                    )
-                    session.add(ai_detection_record)
-
-                # Plagiarism Detection (within batch, using cached embeddings)
-                if analysis_type in ["plagiarism", "both", "mixed"] and embedding_service.model:
-                    similar_results = await plagiarism_service.find_similar_in_batch(doc, batch_id)
-
-                    for res in similar_results:
-                        comparison = Comparison(
-                            doc_a=doc.id,
-                            doc_b=res["document_id"],
-                            similarity=res["similarity"],
-                            matches=res.get("matches", []),
-                        )
-                        session.add(comparison)
-
-                    # Cross-batch plagiarism detection
-                    cross_batch_results = await plagiarism_service.find_similar_across_batches(
-                        doc, exclude_batch_id=str(batch_id)
-                    )
-                    for res in cross_batch_results:
-                        from sqlalchemy import select as sa_select
-                        match_doc_id = res["document_id"]
-                        existing = await session.execute(
-                            sa_select(Comparison).where(
-                                Comparison.doc_a == doc.id,
-                                Comparison.doc_b == match_doc_id,
-                            )
-                        )
-                        if not existing.scalar_one_or_none():
-                            comparison = Comparison(
-                                doc_a=doc.id,
-                                doc_b=match_doc_id,
-                                similarity=res["similarity"],
-                                matches=[{
-                                    "cross_batch": True,
-                                    "source_filename": res.get("filename", "unknown"),
-                                }],
-                            )
-                            session.add(comparison)
-
-                doc.status = "completed"
-                completed_count += 1
-                await session.commit()
-
-            except Exception as e:
-                print(f"Error processing document {doc.id}: {e}")
-                await session.rollback()
-                doc = await session.get(Document, doc.id)
-                if doc:
-                    doc.status = "failed"
-                    failed_count += 1
-                    try:
-                        await session.commit()
-                    except Exception:
-                        await session.rollback()
-                        print(f"Could not update status for document {doc.id}")
-
-        # Update batch status based on results
-        if failed_count == len(documents):
-            batch.status = "failed"
-        elif failed_count > 0:
-            batch.status = "completed_with_errors"
-        else:
-            batch.status = "completed"
-
-        batch.processed_docs = completed_count
+                prof = plagiarism.profile(str(d["id"]), d["text"], d["filename"], d["content_hash"])
+                profiles[d["id"]] = prof
+                vec = plagiarism.document_vector(prof)
+                if vec:
+                    vectors.append(vec)
+                    await session.execute(update(Document).where(Document.id == d["id"]).values(embedding=vec))
+            except Exception as exc:
+                logger.exception("Profiling failed for %s", d["id"])
+                d["error"] = f"Could not prepare document for comparison: {exc}"
         await session.commit()
 
-        # Free the embedding cache to release memory
-        plagiarism_service.clear_cache()
+        # ── Phase 2: cross-batch candidates, fetched once ──
+        try:
+            candidates = await plagiarism.cross_batch_candidates(
+                str(batch_id), vectors, [d["content_hash"] for d in work]
+            )
+        except Exception:
+            logger.exception("Cross-batch search failed for batch %s", batch_id)
+            await session.rollback()
+            candidates = []
+
+    ai_service = None
+    if do_ai:
+        from app.services.ai_detection import AIDetectionService
+
+        ai_service = AIDetectionService()
+
+    # ── Phase 3: per-document analysis ──
+    for d in work:
+        doc_id = d["id"]
+        try:
+            if d.get("error"):
+                raise RuntimeError(d["error"])
+            await session.execute(update(Document).where(Document.id == doc_id).values(status="processing"))
+            values = {"status": "completed", "error": None}
+
+            if ai_service:
+                ai = await asyncio.to_thread(ai_service.detect, d["text"], provider, ai_threshold)
+                if ai.get("label") == "Error":
+                    raise RuntimeError(ai.get("details", {}).get("error", "AI detection failed"))
+                values.update(
+                    ai_score=ai.get("score", 0.0),
+                    is_ai_generated=ai.get("is_ai", False),
+                    ai_confidence=ai.get("confidence", 0.0),
+                    ai_provider=str(ai.get("provider", "unknown")),
+                    ai_label=ai.get("label"),
+                )
+                session.add(AIDetection(
+                    document_id=doc_id,
+                    model_version=ai.get("details", {}).get("model", "unknown"),
+                    probability=ai.get("score", 0.0),
+                    meta_data={
+                        "provider": str(ai.get("provider", "unknown")),
+                        "confidence": ai.get("confidence", 0.0),
+                        "label": ai.get("label", "unknown"),
+                        "statistics": ai.get("details", {}).get("statistics", {}),
+                        "warning": ai.get("details", {}).get("warning"),
+                    },
+                ))
+
+            if plagiarism and doc_id in profiles:
+                me = profiles[doc_id]
+                # Within this batch.
+                for other in work:
+                    if other["id"] == doc_id or other["id"] not in profiles:
+                        continue
+                    res = plagiarism.compare(me, profiles[other["id"]])
+                    if plagiarism.is_reportable(res):
+                        session.add(_comparison(doc_id, other["id"], res, cross_batch=False))
+                # Against earlier batches.
+                for cand in candidates:
+                    cand_prof = plagiarism.profile(
+                        cand["id"], cand["text_content"], cand["filename"], cand["content_hash"],
+                        with_embeddings=cand["semantic"],
+                    )
+                    res = plagiarism.compare(me, cand_prof)
+                    if plagiarism.is_reportable(res):
+                        session.add(_comparison(doc_id, cand["id"], res, cross_batch=True))
+
+            await session.execute(update(Document).where(Document.id == doc_id).values(**values))
+            await session.commit()
+        except Exception as exc:
+            logger.exception("Document %s failed", doc_id)
+            await session.rollback()
+            await _fail_doc(session, doc_id, str(exc) or exc.__class__.__name__)
+            failed += 1
+
+        processed += 1
+        await _set_progress(session, batch_id, processed)
+
+    total = len(docs)
+    if total == 0 or failed == total:
+        status = "failed"
+    elif failed:
+        status = "completed_with_errors"
+    else:
+        status = "completed"
+    await session.execute(
+        update(Batch).where(Batch.id == batch_id).values(status=status, processed_docs=processed)
+    )
+    await session.commit()
+    if plagiarism:
+        plagiarism.clear_cache()
+
+
+def _comparison(doc_a, doc_b, res: Dict, cross_batch: bool) -> Comparison:
+    return Comparison(
+        doc_a=doc_a,
+        doc_b=doc_b,
+        similarity=res["similarity"],
+        lexical_similarity=res.get("lexical_similarity"),
+        semantic_similarity=res.get("semantic_similarity"),
+        cross_batch=cross_batch,
+        matches=res.get("matches", []),
+    )
+
+
+async def _fail_doc(session: AsyncSession, doc_id, message: str):
+    await session.execute(
+        update(Document).where(Document.id == doc_id).values(status="failed", error=message[:2000])
+    )
+    await session.commit()
+
+
+async def _set_progress(session: AsyncSession, batch_id, processed: int):
+    await session.execute(update(Batch).where(Batch.id == batch_id).values(processed_docs=processed))
+    await session.commit()

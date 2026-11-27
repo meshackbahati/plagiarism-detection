@@ -1,114 +1,160 @@
-import zipfile
-import tarfile
+"""
+Safe archive extraction (zip, tar, tar.gz, tgz, tar.bz2).
+
+Protects against:
+- zip-slip / path traversal (absolute paths, "..", symlinks escaping the dir)
+- zip bombs (caps on member count, per-file size and total uncompressed size)
+- device files, FIFOs and links inside tarballs (only regular files are read)
+
+Files are read straight from the archive into memory, never written to a
+shared temp dir, so nothing is left behind if processing fails.
+"""
+
+from __future__ import annotations
+
+import logging
 import os
-from typing import List, Tuple
-from pathlib import Path
-import tempfile
+import posixpath
+import tarfile
+import zipfile
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Iterable, List, Optional, Tuple
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class ArchiveError(Exception):
+    """Archive is unreadable or exceeds safety limits. Message is user-facing."""
+
+
+@dataclass
+class ArchiveMember:
+    name: str  # path inside the archive (posix, sanitised)
+    content: bytes
 
 
 class ArchiveExtractor:
-    """Handles extraction of tar and zip archives with path traversal protection."""
-
-    SUPPORTED_EXTENSIONS = {'.zip', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2'}
+    SUPPORTED_EXTENSIONS = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2"}
 
     @staticmethod
     def is_archive(filename: str) -> bool:
-        """Check if file is a supported archive"""
-        path = Path(filename)
-        # Check for compound extensions like .tar.gz
-        if path.suffix == '.gz' and path.stem.endswith('.tar'):
-            return True
-        if path.suffix == '.bz2' and path.stem.endswith('.tar'):
-            return True
-        return path.suffix in ArchiveExtractor.SUPPORTED_EXTENSIONS
+        name = (filename or "").lower()
+        return any(name.endswith(ext) for ext in ArchiveExtractor.SUPPORTED_EXTENSIONS)
 
     @staticmethod
-    def _is_safe_path(member_name: str, extract_to: str) -> bool:
-        """Validate that an archive entry path doesn't escape the extraction directory."""
-        # Reject absolute paths and path traversal
-        if os.path.isabs(member_name):
-            return False
-        target = os.path.realpath(os.path.join(extract_to, member_name))
-        return target.startswith(os.path.realpath(extract_to) + os.sep) or target == os.path.realpath(extract_to)
+    def _safe_member_name(name: str) -> Optional[str]:
+        """Return a normalised relative path, or None if the entry is unsafe/junk."""
+        name = name.replace("\\", "/")
+        if name.startswith("/") or (len(name) > 1 and name[1] == ":"):
+            return None
+        norm = posixpath.normpath(name)
+        if norm in ("", ".") or norm.startswith("../") or norm == "..":
+            return None
+        parts = PurePosixPath(norm).parts
+        # macOS resource forks and hidden files are never documents.
+        if any(p == "__MACOSX" or p.startswith("._") or p == ".DS_Store" for p in parts):
+            return None
+        return norm
 
     @staticmethod
-    def extract_archive(archive_path: str, extract_to: str = None) -> List[str]:
+    def _wanted(name: str, allowed_extensions: Optional[Iterable[str]]) -> bool:
+        if not allowed_extensions:
+            return True
+        return os.path.splitext(name)[1].lower() in set(allowed_extensions)
+
+    @classmethod
+    def read_members(
+        cls,
+        archive_bytes: bytes,
+        filename: str,
+        allowed_extensions: Optional[Iterable[str]] = None,
+    ) -> Tuple[List[ArchiveMember], List[str]]:
         """
-        Extract archive and return list of extracted file paths.
-
-        Includes path traversal protection to prevent zip-slip attacks.
-
-        Args:
-            archive_path: Path to the archive file
-            extract_to: Directory to extract to (creates temp dir if None)
-
-        Returns:
-            List of paths to extracted files
+        Read regular files from an archive held in memory.
+        Returns (members, skipped_notes).
         """
-        if extract_to is None:
-            extract_to = tempfile.mkdtemp()
+        import io
 
-        extracted_files = []
-        path = Path(archive_path)
+        max_members = settings.ARCHIVE_MAX_FILES
+        max_file = settings.ARCHIVE_MAX_FILE_BYTES
+        max_total = settings.ARCHIVE_MAX_TOTAL_BYTES
+
+        members: List[ArchiveMember] = []
+        skipped: List[str] = []
+        total = 0
+        lower = filename.lower()
+
+        def accept(name: str, size: int) -> bool:
+            nonlocal total
+            if len(members) >= max_members:
+                raise ArchiveError(f"Archive has more than {max_members} files.")
+            if size > max_file:
+                skipped.append(f"{name}: larger than {max_file // (1024 * 1024)}MB")
+                return False
+            if total + size > max_total:
+                raise ArchiveError(
+                    f"Archive expands to more than {max_total // (1024 * 1024)}MB, refusing to extract."
+                )
+            total += size
+            return True
 
         try:
-            if path.suffix == '.zip':
-                with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-                    # Validate all entries before extraction
-                    for name in zip_ref.namelist():
-                        if not ArchiveExtractor._is_safe_path(name, extract_to):
-                            print(f"Skipping unsafe zip entry: {name}")
+            if lower.endswith(".zip"):
+                with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
                             continue
-                    zip_ref.extractall(extract_to)
-                    extracted_files = [
-                        os.path.join(extract_to, name)
-                        for name in zip_ref.namelist()
-                        if not name.endswith('/') and ArchiveExtractor._is_safe_path(name, extract_to)
-                    ]
-
-            elif '.tar' in path.name:
-                # Handles .tar, .tar.gz, .tar.bz2, etc.
-                mode = 'r:*'  # Auto-detect compression
-                with tarfile.open(archive_path, mode) as tar_ref:
-                    # Filter out unsafe members before extraction
-                    safe_members = []
-                    for member in tar_ref.getmembers():
-                        if not ArchiveExtractor._is_safe_path(member.name, extract_to):
-                            print(f"Skipping unsafe tar entry: {member.name}")
+                        safe = cls._safe_member_name(info.filename)
+                        if safe is None:
                             continue
-                        safe_members.append(member)
-                    tar_ref.extractall(extract_to, members=safe_members)
-                    extracted_files = [
-                        os.path.join(extract_to, member.name)
-                        for member in safe_members
-                        if member.isfile()
-                    ]
-        except Exception as e:
-            print(f"Error extracting archive {archive_path}: {e}")
+                        if not cls._wanted(safe, allowed_extensions):
+                            skipped.append(f"{safe}: unsupported file type")
+                            continue
+                        if info.flag_bits & 0x1:
+                            skipped.append(f"{safe}: encrypted")
+                            continue
+                        if not accept(safe, info.file_size):
+                            continue
+                        # Read with a hard cap: file_size in the header can lie.
+                        with zf.open(info) as fh:
+                            data = fh.read(max_file + 1)
+                        if len(data) > max_file:
+                            skipped.append(f"{safe}: larger than declared")
+                            continue
+                        members.append(ArchiveMember(safe, data))
+            else:
+                with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as tf:
+                    for info in tf:
+                        if not info.isreg():  # skip dirs, links, devices, fifos
+                            continue
+                        safe = cls._safe_member_name(info.name)
+                        if safe is None:
+                            continue
+                        if not cls._wanted(safe, allowed_extensions):
+                            skipped.append(f"{safe}: unsupported file type")
+                            continue
+                        if not accept(safe, info.size):
+                            continue
+                        fh = tf.extractfile(info)
+                        if fh is None:
+                            continue
+                        members.append(ArchiveMember(safe, fh.read(max_file + 1)[:max_file]))
+        except ArchiveError:
             raise
+        except (zipfile.BadZipFile, tarfile.TarError, EOFError, OSError) as exc:
+            raise ArchiveError(f"Archive is damaged or not a valid {os.path.splitext(lower)[1]} file.") from exc
+        except NotImplementedError as exc:  # unsupported zip compression
+            raise ArchiveError(f"Archive uses an unsupported compression method ({exc}).") from exc
 
-        return extracted_files
+        return members, skipped
 
-    @staticmethod
-    def extract_and_filter(archive_path: str, allowed_extensions: List[str] = None) -> List[Tuple[str, str]]:
-        """
-        Extract archive and filter files by extension.
+    # ── Backwards-compatible helpers (path based) ──
 
-        Args:
-            archive_path: Path to archive
-            allowed_extensions: List of allowed extensions (e.g., ['.txt', '.pdf'])
-
-        Returns:
-            List of tuples (original_filename, extracted_path)
-        """
-        extracted_files = ArchiveExtractor.extract_archive(archive_path)
-
-        if allowed_extensions:
-            filtered = []
-            for fpath in extracted_files:
-                ext = Path(fpath).suffix.lower()
-                if ext in allowed_extensions:
-                    filtered.append((Path(fpath).name, fpath))
-            return filtered
-
-        return [(Path(fpath).name, fpath) for fpath in extracted_files]
+    @classmethod
+    def extract_and_filter(cls, archive_path: str, allowed_extensions: List[str] = None) -> List[Tuple[str, bytes]]:
+        with open(archive_path, "rb") as fh:
+            members, _ = cls.read_members(fh.read(), archive_path, allowed_extensions)
+        return [(m.name, m.content) for m in members]

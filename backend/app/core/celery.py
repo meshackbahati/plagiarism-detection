@@ -1,8 +1,12 @@
+import os
+
 from celery import Celery
 from app.core.config import settings
 
 
-app = Celery('plagiarism_detection')
+# include=: autodiscover_tasks() only looks for modules named `tasks`, so the
+# worker never registered process_batch and rejected every job.
+app = Celery('plagiarism_detection', include=['app.services.batch_processing'])
 
 # Configure Celery with explicit settings
 app.conf.update(
@@ -22,8 +26,9 @@ app.conf.update(
     worker_max_tasks_per_child=5,
     task_acks_late=True,
     task_reject_on_worker_lost=True,
+    # Hard stop for runaway jobs (huge scans/OCR); soft limit lets the task
+    # mark the batch failed cleanly first.
+    task_soft_time_limit=int(os.getenv("TASK_SOFT_TIME_LIMIT", "3300")),
+    task_time_limit=int(os.getenv("TASK_TIME_LIMIT", "3600")),
+    broker_connection_retry_on_startup=True,
 )
-
-
-# Import tasks
-app.autodiscover_tasks(['app.services'])

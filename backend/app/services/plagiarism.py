@@ -1,216 +1,247 @@
-from typing import List, Dict, Any, Optional, Tuple
-import numpy as np
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text
+"""
+Plagiarism detection: lexical fingerprints + semantic embeddings.
 
-from app.models import Document
-from app.services.embedding import EmbeddingService
+Two complementary signals:
+1. Lexical (always on, no model): shared word n-grams find verbatim and
+   lightly edited copying, with the exact copied passages as evidence.
+2. Semantic (when the embedding model is loaded): sentence-level chunk
+   embeddings catch paraphrasing that changes the words but keeps meaning.
+
+similarity = max(lexical coverage, semantic coverage). Both are "share of
+this document that matches the other one", so the number reads the same
+way whichever signal produced it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence
+
+import numpy as np
+from sqlalchemy import bindparam, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import settings
+from app.models import Document
+from app.services.embedding import EmbeddingService, TextChunk, chunk_text
+from app.services.fingerprint import Fingerprint, build_fingerprint, compare_fingerprints
+
+
+@dataclass
+class DocProfile:
+    doc_id: str
+    filename: str
+    fingerprint: Fingerprint
+    chunks: List[TextChunk]
+    matrix: Optional[np.ndarray]  # (n_chunks, dim), L2-normalised, or None
+    content_hash: Optional[str] = None
 
 
 class PlagiarismService:
-    """
-    Plagiarism detection using semantic embeddings.
-
-    Key optimization: chunk embeddings are computed once per document and
-    cached in a dict, then reused for all pairwise comparisons within a batch.
-    This eliminates the O(N*M) re-encoding that previously happened when each
-    document was compared against every other document.
-    """
-
-    def __init__(self, db_session: AsyncSession = None):
+    def __init__(self, db_session: AsyncSession = None, use_embeddings: bool = True):
         self.db_session = db_session
         self.embedding_service = EmbeddingService()
+        self.use_embeddings = use_embeddings
+        self._profiles: Dict[str, DocProfile] = {}
 
-        # Cache: doc_id -> (chunks, embeddings)
-        # Populated during batch processing, avoids re-encoding on every comparison
-        self._embedding_cache: Dict[str, Tuple[List[str], list]] = {}
+    @property
+    def semantic_available(self) -> bool:
+        return bool(self.use_embeddings and self.embedding_service.model)
 
-    def calculate_similarity(self, embedding_a, embedding_b) -> float:
-        """Calculate cosine similarity between two embeddings."""
-        if embedding_a is None or embedding_b is None:
-            return 0.0
+    # ── Profiles (computed once per document per run) ──
 
-        vec_a = np.array(embedding_a, dtype=np.float32)
-        vec_b = np.array(embedding_b, dtype=np.float32)
-
-        norm_a = np.linalg.norm(vec_a)
-        norm_b = np.linalg.norm(vec_b)
-
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-
-        return float(np.dot(vec_a, vec_b) / (norm_a * norm_b))
-
-    def precompute_embeddings(self, doc_id: str, text_content: str) -> Tuple[List[str], list]:
-        """
-        Pre-compute and cache chunk embeddings for a document.
-        Call this once per document before running comparisons.
-        Returns (chunks, embeddings).
-        """
-        if doc_id in self._embedding_cache:
-            return self._embedding_cache[doc_id]
-
-        chunks, embeddings = self.embedding_service.encode_chunks(text_content)
-        self._embedding_cache[doc_id] = (chunks, embeddings)
-        return chunks, embeddings
-
-    def compare_cached(
+    def profile(
         self,
-        doc_a_id: str,
-        doc_b_id: str,
-    ) -> Dict[str, Any]:
-        """
-        Compare two documents using pre-cached chunk embeddings.
-        Both documents must have been precomputed via precompute_embeddings().
-        """
-        cache_a = self._embedding_cache.get(doc_a_id)
-        cache_b = self._embedding_cache.get(doc_b_id)
+        doc_id: str,
+        text_content: str,
+        filename: str = "",
+        content_hash: Optional[str] = None,
+        with_embeddings: bool = True,
+    ) -> DocProfile:
+        cached = self._profiles.get(doc_id)
+        if cached and (cached.matrix is not None or not with_embeddings or not self.semantic_available):
+            return cached
+        fingerprint = cached.fingerprint if cached else build_fingerprint(text_content, settings.SHINGLE_SIZE)
+        chunks = cached.chunks if cached else chunk_text(text_content)
+        matrix = None
+        if with_embeddings and self.semantic_available:
+            matrix = self.embedding_service.embed_chunks(chunks)
+        prof = DocProfile(doc_id, filename, fingerprint, chunks, matrix, content_hash)
+        self._profiles[doc_id] = prof
+        return prof
 
-        if not cache_a or not cache_b:
-            return {"score": 0.0, "matches": []}
-
-        chunks_a, embeddings_a = cache_a
-        chunks_b, embeddings_b = cache_b
-
-        if not embeddings_a or not embeddings_b:
-            return {"score": 0.0, "matches": []}
-
-        # Batch-encode doc_b embeddings into a matrix for vectorized comparison
-        matrix_b = np.array(embeddings_b, dtype=np.float32)  # (M, dim)
-        norms_b = np.linalg.norm(matrix_b, axis=1, keepdims=True)
-        norms_b = np.where(norms_b == 0, 1, norms_b)  # avoid div-by-zero
-        normed_b = matrix_b / norms_b
-
-        matches = []
-        total_similarity = 0.0
-
-        for i, emb_a in enumerate(embeddings_a):
-            vec_a = np.array(emb_a, dtype=np.float32)
-            norm_a = np.linalg.norm(vec_a)
-            if norm_a == 0:
-                continue
-            normed_a = vec_a / norm_a
-
-            # Cosine similarity of chunk_a against ALL chunks in B at once
-            similarities = normed_b @ normed_a  # (M,)
-            best_idx = int(np.argmax(similarities))
-            best_score = float(similarities[best_idx])
-
-            if best_score > 0.75:
-                matches.append({
-                    "source_chunk": chunks_a[i],
-                    "target_chunk": chunks_b[best_idx],
-                    "score": round(best_score, 4),
-                    "source_index": i,
-                    "target_index": best_idx,
-                })
-                total_similarity += best_score
-
-        overall_score = total_similarity / len(chunks_a) if chunks_a else 0.0
-
-        return {
-            "score": round(overall_score, 4),
-            "matches": matches,
-            "details": {
-                "chunks_a": len(chunks_a),
-                "chunks_b": len(chunks_b),
-            },
-        }
+    def document_vector(self, prof: DocProfile) -> Optional[List[float]]:
+        return EmbeddingService.document_vector(prof.matrix, prof.chunks)
 
     def clear_cache(self):
-        """Clear the embedding cache to free memory after batch processing."""
-        self._embedding_cache.clear()
+        self._profiles.clear()
 
-    async def find_similar_in_batch(self, document: Document, batch_id: str) -> List[Dict[str, Any]]:
-        """
-        Find similar documents within the same batch using cached embeddings.
-        """
-        if not self.db_session:
-            raise ValueError("Database session required for batch search")
+    # ── Pairwise comparison ──
 
-        query = select(Document).where(
-            Document.batch_id == batch_id,
-            Document.id != document.id,
+    def compare(self, a: DocProfile, b: DocProfile) -> Dict:
+        """How much of document A is found in document B."""
+        if a.content_hash and a.content_hash == b.content_hash and a.fingerprint.word_count:
+            return {
+                "similarity": 1.0,
+                "lexical_similarity": 1.0,
+                "semantic_similarity": 1.0 if a.matrix is not None else None,
+                "matches": [{
+                    "type": "exact",
+                    "source_chunk": "Identical file content.",
+                    "target_chunk": "Identical file content.",
+                    "score": 1.0,
+                    "words": a.fingerprint.word_count,
+                }],
+            }
+
+        lex = compare_fingerprints(
+            a.fingerprint, b.fingerprint, settings.SHINGLE_SIZE, settings.MIN_MATCH_WORDS
         )
-        result = await self.db_session.execute(query)
-        other_docs = result.scalars().all()
+        matches = list(lex["passages"])
+        semantic_score = None
 
-        doc_a_id = str(document.id)
-        results = []
-
-        for other_doc in other_docs:
-            doc_b_id = str(other_doc.id)
-            comparison = self.compare_cached(doc_a_id, doc_b_id)
-
-            if comparison["score"] > 0.1:
-                results.append({
-                    "document_id": doc_b_id,
-                    "filename": other_doc.filename,
-                    "similarity": comparison["score"],
-                    "matches": comparison["matches"],
+        if a.matrix is not None and b.matrix is not None and len(a.chunks) and len(b.chunks):
+            sims = a.matrix @ b.matrix.T  # cosine, since rows are normalised
+            best_idx = sims.argmax(axis=1)
+            best = sims[np.arange(len(a.chunks)), best_idx]
+            threshold = settings.SEMANTIC_MATCH_THRESHOLD
+            total_words = sum(c.words for c in a.chunks) or 1
+            matched_words = 0
+            exact_spans = [p["source_span"] for p in lex["passages"] if "source_span" in p]
+            for i, score in enumerate(best):
+                if score < threshold:
+                    continue
+                chunk = a.chunks[i]
+                matched_words += chunk.words
+                # Skip chunks already shown as exact copies.
+                overlap = sum(
+                    max(0, min(chunk.end, e) - max(chunk.start, s)) for s, e in exact_spans
+                )
+                if overlap > 0.5 * (chunk.end - chunk.start):
+                    continue
+                target = b.chunks[int(best_idx[i])]
+                matches.append({
+                    "type": "semantic",
+                    "source_chunk": chunk.text[:700],
+                    "target_chunk": target.text[:700],
+                    "score": round(float(score), 4),
+                    "words": chunk.words,
+                    "source_span": [chunk.start, chunk.end],
+                    "target_span": [target.start, target.end],
                 })
+            semantic_score = round(matched_words / total_words, 4)
 
-        results.sort(key=lambda x: x["similarity"], reverse=True)
-        return results
+        similarity = max(lex["coverage"], semantic_score or 0.0)
+        return {
+            "similarity": round(similarity, 4),
+            "lexical_similarity": lex["coverage"],
+            "semantic_similarity": semantic_score,
+            "matches": matches[:60],
+        }
 
-    async def find_similar_across_batches(
+    def is_reportable(self, result: Dict) -> bool:
+        return result["similarity"] >= settings.MIN_REPORTED_SIMILARITY or any(
+            m["type"] == "exact" for m in result["matches"]
+        )
+
+    # ── Cross-batch candidate search ──
+
+    async def cross_batch_candidates(
         self,
-        document: Document,
-        exclude_batch_id: Optional[str] = None,
-        top_k: int = 10,
-        min_similarity: float = 0.3,
-    ) -> List[Dict[str, Any]]:
+        exclude_batch_id: str,
+        doc_vectors: Sequence[List[float]],
+        content_hashes: Sequence[str],
+    ) -> List[Dict]:
         """
-        Find similar documents across ALL batches using pgvector similarity search.
-        This enables cross-batch plagiarism detection.
+        Previously analysed documents worth comparing against this batch:
+        - nearest neighbours of each new document by pgvector cosine distance
+        - any document with an identical content hash
+        - the most recent MAX_CROSS_BATCH_DOCS documents (lexical check only)
 
-        Uses the document-level embedding stored on Document.embedding and
-        pgvector's cosine distance operator for fast nearest-neighbor search.
+        Returns dicts with id, filename, batch_id, text_content, content_hash
+        and `semantic` (True if picked by vector search).
         """
         if not self.db_session:
             raise ValueError("Database session required")
 
-        if not document.embedding:
-            return []
+        found: Dict[str, Dict] = {}
 
-        max_docs = settings.MAX_CROSS_BATCH_DOCS
+        def add(row, semantic: bool):
+            key = str(row.id)
+            if key in found:
+                found[key]["semantic"] = found[key]["semantic"] or semantic
+                return
+            found[key] = {
+                "id": key,
+                "created_at": row.created_at,
+                "filename": row.filename,
+                "batch_id": str(row.batch_id),
+                "text_content": row.text_content or "",
+                "content_hash": row.content_hash,
+                "semantic": semantic,
+            }
 
-        # Use pgvector's cosine distance operator (<=>) for efficient search
-        query = text("""
-            SELECT
-                d.id,
-                d.filename,
-                d.batch_id,
-                1 - (d.embedding <=> :embedding::vector) AS similarity
-            FROM documents d
-            WHERE d.id != :doc_id
-              AND d.embedding IS NOT NULL
-              AND d.status = 'completed'
-              AND (:exclude_batch IS NULL OR d.batch_id != :exclude_batch)
-            ORDER BY d.embedding <=> :embedding::vector
-            LIMIT :limit
-        """)
-
-        result = await self.db_session.execute(query, {
-            "doc_id": document.id,
-            "embedding": document.embedding,
-            "exclude_batch": exclude_batch_id,
-            "limit": max_docs,
-        })
-
-        rows = result.all()
-        results = []
-        for row in rows:
-            sim = float(row.similarity)
-            if sim >= min_similarity:
-                results.append({
-                    "document_id": str(row.id),
-                    "filename": row.filename,
-                    "batch_id": str(row.batch_id),
-                    "similarity": round(sim, 4),
-                    "cross_batch": True,
+        # 1. Vector nearest neighbours. CAST(... AS vector) instead of
+        #    ":param::vector": SQLAlchemy does not treat ":name::type" as a
+        #    bind parameter, which broke this query before.
+        if doc_vectors:
+            knn = text(
+                """
+                SELECT d.id, d.filename, d.batch_id, d.text_content, d.content_hash, d.created_at
+                FROM documents d
+                WHERE d.embedding IS NOT NULL
+                  AND d.status = 'completed'
+                  AND d.batch_id <> :exclude_batch
+                ORDER BY d.embedding <=> CAST(:embedding AS vector)
+                LIMIT :limit
+                """
+            ).bindparams(bindparam("exclude_batch"), bindparam("embedding"), bindparam("limit"))
+            for vec in doc_vectors:
+                rows = await self.db_session.execute(knn, {
+                    "exclude_batch": exclude_batch_id,
+                    "embedding": "[" + ",".join(f"{x:.7f}" for x in vec) + "]",
+                    "limit": settings.CROSS_BATCH_CANDIDATES,
                 })
+                for row in rows:
+                    add(row, True)
 
-        results.sort(key=lambda x: x["similarity"], reverse=True)
-        return results[:top_k]
+        cols = (Document.id, Document.filename, Document.batch_id, Document.text_content,
+                Document.content_hash, Document.created_at)
+
+        # 2. Identical files uploaded before.
+        hashes = [h for h in content_hashes if h]
+        if hashes:
+            rows = await self.db_session.execute(
+                select(*cols).where(
+                    Document.content_hash.in_(hashes),
+                    Document.batch_id != exclude_batch_id,
+                    Document.status == "completed",
+                )
+            )
+            for row in rows:
+                add(row, False)
+
+        # 3. Recent corpus for lexical copy checks (works without any model).
+        if settings.MAX_CROSS_BATCH_DOCS > 0:
+            rows = await self.db_session.execute(
+                select(*cols)
+                .where(Document.batch_id != exclude_batch_id, Document.status == "completed")
+                .order_by(Document.created_at.desc())
+                .limit(settings.MAX_CROSS_BATCH_DOCS)
+            )
+            for row in rows:
+                add(row, False)
+
+        # The same file uploaded in several earlier batches would show up as
+        # many identical matches. Keep only its first upload (the original).
+        by_hash: Dict[str, Dict] = {}
+        result: List[Dict] = []
+        for cand in sorted(found.values(), key=lambda c: (c["created_at"] is None, c["created_at"])):
+            h = cand["content_hash"]
+            if h and h in by_hash:
+                by_hash[h]["semantic"] = by_hash[h]["semantic"] or cand["semantic"]
+                continue
+            if h:
+                by_hash[h] = cand
+            result.append(cand)
+        return result

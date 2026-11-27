@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Integer, DateTime, func, UUID, ForeignKey, Float
+from sqlalchemy import Column, String, Integer, DateTime, func, UUID, ForeignKey, Float, Text
 from .base import Base
 
 class Batch(Base):
@@ -14,4 +14,5 @@ class Batch(Base):
     analysis_type = Column(String, default="plagiarism")  # plagiarism, ai, or both
     ai_provider = Column(String, default="local")  # AI detection provider
     ai_threshold = Column(Float, default=0.5)  # AI detection threshold
+    error = Column(Text)  # set when the whole batch fails
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -1,4 +1,3 @@
-import os
 import re
 import json
 import math
@@ -7,7 +6,7 @@ from typing import Dict, Any, Optional
 from collections import Counter
 
 from app.core.provider_router import ProviderRouter, ProviderType
-from app.core.model_manager import model_manager
+from app.core.model_manager import AI_CLASSIFIER_MODEL, model_manager
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +92,7 @@ class AIDetectionService:
                 "label": "Likely AI" if is_ai else "Likely Human",
                 "provider": ProviderType.LOCAL,
                 "details": {
-                    "model": "roberta-base-openai-detector",
+                    "model": AI_CLASSIFIER_MODEL,
                     "model_score": model_result["score"],
                     "heuristic_score": stats["score"],
                     "chunks_analyzed": model_result.get("chunks_analyzed", 0),
@@ -124,15 +123,20 @@ class AIDetectionService:
         if not self.classifier:
             return None
 
-        chunk_size = 512
-        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-        chunks = chunks[:20]  # Cap to prevent OOM on massive files
+        # ~300-word windows on word boundaries (the model sees at most 512
+        # tokens; the pipeline truncates anything longer). Sample evenly across
+        # the whole document instead of only its first pages.
+        words = text.split()
+        window = 300
+        chunks = [" ".join(words[i:i + window]) for i in range(0, len(words), window)]
+        chunks = [c for c in chunks if len(c.split()) >= 40] or chunks[:1]
+        max_chunks = 20
+        if len(chunks) > max_chunks:
+            step = len(chunks) / max_chunks
+            chunks = [chunks[int(i * step)] for i in range(max_chunks)]
 
-        results = []
         try:
-            for chunk in chunks:
-                res = self.classifier(chunk[:512])[0]
-                results.append(res)
+            results = self.classifier(chunks, batch_size=8)
         except Exception as e:
             logger.error(f"Model inference failed: {e}")
             return None
@@ -140,17 +144,18 @@ class AIDetectionService:
         if not results:
             return None
 
-        # Model returns label='Fake' (AI) or 'Real' (Human)
-        ai_probs = []
-        for res in results:
-            score = res["score"]
-            if res["label"] == "Fake":
-                ai_probs.append(score)
-            else:
-                ai_probs.append(1 - score)
+        # Model returns label='Fake' (AI) or 'Real' (Human). Weight each
+        # window by its length so a short tail does not swing the score.
+        weighted, total = 0.0, 0
+        for chunk, res in zip(chunks, results):
+            if isinstance(res, list):
+                res = res[0]
+            prob = res["score"] if res["label"] == "Fake" else 1 - res["score"]
+            n = len(chunk.split())
+            weighted += prob * n
+            total += n
 
-        avg_score = sum(ai_probs) / len(ai_probs)
-        return {"score": avg_score, "chunks_analyzed": len(results)}
+        return {"score": weighted / total if total else 0.5, "chunks_analyzed": len(results)}
 
     # ── Statistical heuristics ──
 
@@ -166,7 +171,9 @@ class AIDetectionService:
         - Sentence length uniformity: AI sentences cluster around 15-25 words.
         - Paragraph regularity: AI paragraphs tend to be similar lengths.
         """
-        sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+        # Split on sentence-ending punctuation followed by whitespace, so
+        # decimals ("3.14") and abbreviations inside words do not split.
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+|\n{2,}', text) if s.strip()]
         words = text.split()
 
         if len(sentences) < 3 or len(words) < 20:
