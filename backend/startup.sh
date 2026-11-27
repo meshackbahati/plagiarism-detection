@@ -93,7 +93,7 @@ if [ "$1" == "api" ]; then
     echo "Starting Gunicorn..."
     exec gunicorn -k uvicorn.workers.UvicornWorker \
         --bind 0.0.0.0:8000 \
-        --workers 4 \
+        --workers "${WEB_CONCURRENCY:-2}" \
         --timeout 300 \
         app.main:app
 else

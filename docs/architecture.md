@@ -87,19 +87,18 @@ Scoring: 70% model + 30% heuristics (local), 75% API + 25% heuristics (external)
 ### 4. Embedding Service (`app/services/embedding.py`)
 
 Generates Sentence-BERT embeddings via the shared `ModelManager`:
-- Chunks text into 500-char segments with 50-char overlap
-- Encodes each chunk into a 384-dimensional vector
-- Averages chunk embeddings for document-level embedding
+- Splits text into whole sentences grouped into ~80-word chunks (never cuts a word)
+- Batch-encodes chunks into normalised 384-dimensional vectors
+- Document vector = word-weighted mean of chunk vectors (stored for pgvector search)
 
-### 5. Plagiarism Service (`app/services/plagiarism.py`)
+### 5. Plagiarism Service (`app/services/plagiarism.py`, `app/services/fingerprint.py`)
 
-Two-phase comparison pipeline:
+Two signals, combined as `max(word_for_word, paraphrased)`:
+- **Word-for-word:** 5-word shingle fingerprints find copied passages, with exact snippets. No model needed.
+- **Paraphrase:** chunk-embedding cosine (matrix multiply) above `SEMANTIC_MATCH_THRESHOLD`.
+- **Cross-batch candidates:** pgvector nearest neighbours, identical `content_hash`, and the most recent `MAX_CROSS_BATCH_DOCS` documents. Fetched once per batch.
 
-**Phase 1 -- Pre-compute:** All documents encoded once, cached in memory.
-
-**Phase 2 -- Compare:** Pairwise comparison using cached embeddings with vectorized numpy operations. Each chunk in doc A compared against all chunks in doc B via matrix multiply.
-
-**Cross-batch search:** Document-level embeddings queried against all stored documents via pgvector cosine distance (`<=>` operator).
+See [Plagiarism Detection](plagiarism.md) for the full algorithm.
 
 ### 6. API Endpoints
 
@@ -126,33 +125,23 @@ Two-phase comparison pipeline:
 
 ### 7. Batch Processing (`app/services/batch_processing.py`)
 
-Celery task that runs asynchronously:
+Celery task that runs asynchronously, with its own NullPool database engine per task (every task runs in a fresh event loop):
 
 ```
 process_batch(batch_id, provider, ai_threshold)
 │
-├── Phase 1: Pre-compute embeddings for all documents
-│   ├── Encode chunks (once per document)
-│   ├── Cache in PlagiarismService._embedding_cache
-│   └── Store document-level embedding in DB
+├── Delete old comparisons/AI rows for the batch (re-runs are idempotent)
+├── Documents that failed at upload keep their error and are skipped
+├── Phase 1: profile each document once (fingerprints, chunk embeddings, document vector)
+├── Phase 2: fetch cross-batch candidates once for the whole batch
+├── Phase 3: per document
+│   ├── AI detection (if requested) -> Document fields + AIDetection row
+│   ├── Compare against the other documents in the batch
+│   ├── Compare against cross-batch candidates
+│   ├── Commit, update processed_docs (drives the progress bar)
+│   └── On error: rollback this document only, store the reason in documents.error
 │
-├── Phase 2: Process each document
-│   ├── AI detection (if analysis_type includes AI)
-│   │   ├── Store score, label, confidence on Document
-│   │   └── Store detailed result in AIDetection table
-│   │
-│   ├── Within-batch plagiarism (if analysis_type includes plagiarism)
-│   │   ├── Compare against all other docs in batch (cached)
-│   │   └── Store Comparison records
-│   │
-│   ├── Cross-batch plagiarism
-│   │   ├── pgvector similarity search against all stored docs
-│   │   └── Store cross-batch Comparison records
-│   │
-│   └── Error handling: session rollback, doc marked "failed"
-│
-├── Update batch status: completed / completed_with_errors / failed
-└── Clear embedding cache
+└── Batch status: completed / completed_with_errors / failed (crash -> failed + batches.error)
 ```
 
 **Worker configuration:**
