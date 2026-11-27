@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     MIN_MATCH_WORDS: int = int(os.getenv("MIN_MATCH_WORDS", "8"))  # shortest copied passage reported
     SEMANTIC_MATCH_THRESHOLD: float = float(os.getenv("SEMANTIC_MATCH_THRESHOLD", "0.82"))
     MIN_REPORTED_SIMILARITY: float = float(os.getenv("MIN_REPORTED_SIMILARITY", "0.05"))
+    # "user": compare only against the same account's earlier uploads.
+    # "all": shared corpus (e.g. a whole school); other accounts' file names
+    # and text are redacted in results and reports.
+    CROSS_BATCH_SCOPE: str = os.getenv("CROSS_BATCH_SCOPE", "user").lower()
     CROSS_BATCH_CANDIDATES: int = int(os.getenv("CROSS_BATCH_CANDIDATES", "20"))
     
     # Celery settings

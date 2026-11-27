@@ -61,6 +61,7 @@ Re-running a batch first deletes its old comparisons, so results never duplicate
 | `MIN_MATCH_WORDS` | `8` | Shortest copied passage reported |
 | `SEMANTIC_MATCH_THRESHOLD` | `0.82` | Cosine needed to call a chunk a paraphrase |
 | `MIN_REPORTED_SIMILARITY` | `0.05` | Hide pairs below this overall score |
+| `CROSS_BATCH_SCOPE` | `user` | `user` searches only the uploader's own earlier batches. `all` searches every account (a shared corpus) but shows another account's match as "Document from another account" with its text hidden |
 | `CROSS_BATCH_CANDIDATES` | `20` | Nearest neighbours fetched per document from pgvector |
 | `MAX_CROSS_BATCH_DOCS` | `500` | Recent earlier documents checked word-for-word |
 

@@ -22,7 +22,9 @@ from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models import Document
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+
+from app.models import Batch, Document
 from app.services.embedding import EmbeddingService, TextChunk, chunk_text
 from app.services.fingerprint import Fingerprint, build_fingerprint, compare_fingerprints
 
@@ -151,6 +153,7 @@ class PlagiarismService:
         exclude_batch_id: str,
         doc_vectors: Sequence[List[float]],
         content_hashes: Sequence[str],
+        owner_id=None,
     ) -> List[Dict]:
         """
         Previously analysed documents worth comparing against this batch:
@@ -165,6 +168,9 @@ class PlagiarismService:
             raise ValueError("Database session required")
 
         found: Dict[str, Dict] = {}
+        # Only search the uploader's own documents unless a shared corpus is
+        # explicitly enabled (CROSS_BATCH_SCOPE=all).
+        scoped = settings.CROSS_BATCH_SCOPE != "all" and owner_id is not None
 
         def add(row, semantic: bool):
             key = str(row.id)
@@ -189,18 +195,24 @@ class PlagiarismService:
                 """
                 SELECT d.id, d.filename, d.batch_id, d.text_content, d.content_hash, d.created_at
                 FROM documents d
+                JOIN batches b ON b.id = d.batch_id
                 WHERE d.embedding IS NOT NULL
+                  AND (:owner IS NULL OR b.user_id = :owner)
                   AND d.status = 'completed'
                   AND d.batch_id <> :exclude_batch
                 ORDER BY d.embedding <=> CAST(:embedding AS vector)
                 LIMIT :limit
                 """
-            ).bindparams(bindparam("exclude_batch"), bindparam("embedding"), bindparam("limit"))
+            ).bindparams(
+                bindparam("exclude_batch"), bindparam("embedding"), bindparam("limit"),
+                bindparam("owner", type_=PG_UUID(as_uuid=True)),
+            )
             for vec in doc_vectors:
                 rows = await self.db_session.execute(knn, {
                     "exclude_batch": exclude_batch_id,
                     "embedding": "[" + ",".join(f"{x:.7f}" for x in vec) + "]",
                     "limit": settings.CROSS_BATCH_CANDIDATES,
+                    "owner": owner_id if scoped else None,
                 })
                 for row in rows:
                     add(row, True)
@@ -208,11 +220,16 @@ class PlagiarismService:
         cols = (Document.id, Document.filename, Document.batch_id, Document.text_content,
                 Document.content_hash, Document.created_at)
 
+        def owned(stmt):
+            if scoped:
+                stmt = stmt.join(Batch, Batch.id == Document.batch_id).where(Batch.user_id == owner_id)
+            return stmt
+
         # 2. Identical files uploaded before.
         hashes = [h for h in content_hashes if h]
         if hashes:
             rows = await self.db_session.execute(
-                select(*cols).where(
+                owned(select(*cols)).where(
                     Document.content_hash.in_(hashes),
                     Document.batch_id != exclude_batch_id,
                     Document.status == "completed",
@@ -224,7 +241,7 @@ class PlagiarismService:
         # 3. Recent corpus for lexical copy checks (works without any model).
         if settings.MAX_CROSS_BATCH_DOCS > 0:
             rows = await self.db_session.execute(
-                select(*cols)
+                owned(select(*cols))
                 .where(Document.batch_id != exclude_batch_id, Document.status == "completed")
                 .order_by(Document.created_at.desc())
                 .limit(settings.MAX_CROSS_BATCH_DOCS)

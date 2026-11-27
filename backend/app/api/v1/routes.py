@@ -373,13 +373,13 @@ async def get_batch_results(
     documents = (
         await db.execute(select(Document).where(Document.batch_id == batch_id).order_by(Document.filename))
     ).scalars().all()
-    comparisons = await _fetch_comparisons(db, documents)
+    comparisons = await _fetch_comparisons(db, documents, user.id)
 
     results = []
     for doc in documents:
         plagiarism_details = [
             {
-                "document_id": str(comp.doc_b),
+                "document_id": str(comp.doc_b) if comp.doc_b else None,
                 "similar_document": match_filename,
                 "similarity": comp.similarity,
                 "lexical_similarity": comp.lexical_similarity,
@@ -454,24 +454,44 @@ async def delete_batch(
     return {"status": "ok", "deleted_documents": len(doc_ids)}
 
 
-async def _fetch_comparisons(db: AsyncSession, documents) -> dict:
-    """Map doc_id -> list of (Comparison, match_filename), highest similarity first."""
+OTHER_ACCOUNT = "Document from another account"
+
+
+def _redact(comp: Comparison) -> None:
+    """Hide another account's text in a shared-corpus match (not persisted)."""
+    comp.matches = [
+        {**m, "target_chunk": "[hidden: belongs to another account]"} for m in (comp.matches or [])
+    ]
+
+
+async def _fetch_comparisons(db: AsyncSession, documents, viewer_id=None) -> dict:
+    """
+    Map doc_id -> list of (Comparison, match_filename), highest similarity
+    first. Matches against another account's document are redacted.
+    """
     doc_ids = [doc.id for doc in documents]
     if not doc_ids:
         return {}
 
     DocB = aliased(Document)
+    BatchB = aliased(Batch)
     rows = (
         await db.execute(
-            select(Comparison, DocB.filename.label("match_filename"))
+            select(Comparison, DocB.filename.label("match_filename"), BatchB.user_id.label("owner"))
             .join(DocB, Comparison.doc_b == DocB.id)
+            .join(BatchB, DocB.batch_id == BatchB.id)
             .where(Comparison.doc_a.in_(doc_ids))
             .order_by(Comparison.similarity.desc())
         )
     ).all()
 
     lookup: dict = {doc_id: [] for doc_id in doc_ids}
-    for comp, match_filename in rows:
+    for comp, match_filename, owner in rows:
+        if viewer_id is not None and owner != viewer_id:
+            db.expunge(comp)  # never write the redaction back
+            _redact(comp)
+            comp.doc_b = None
+            match_filename = OTHER_ACCOUNT
         lookup.setdefault(comp.doc_a, []).append((comp, match_filename))
     return lookup
 
@@ -491,7 +511,7 @@ async def export_batch_pdf(
     documents = documents_result.scalars().all()
 
     # Query comparisons for all documents in this batch
-    comparisons = await _fetch_comparisons(db, documents)
+    comparisons = await _fetch_comparisons(db, documents, user.id)
 
     pdf_content = ReportService.generate_pdf_report(batch, documents, comparisons)
 
@@ -517,7 +537,7 @@ async def export_batch_csv(
     documents = documents_result.scalars().all()
 
     # Query comparisons for all documents in this batch
-    comparisons = await _fetch_comparisons(db, documents)
+    comparisons = await _fetch_comparisons(db, documents, user.id)
 
     csv_content = ReportService.generate_csv_report(batch, documents, comparisons)
 

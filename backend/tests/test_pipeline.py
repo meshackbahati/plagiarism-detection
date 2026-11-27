@@ -176,3 +176,43 @@ async def test_validation_errors(client):
     assert r.status_code == 400 and "OPENAI_API_KEY" in r.json()["detail"]
     r = await client.post("/api/v1/analyze", data={"text": "hello", "options": json.dumps({"check_ai": False, "check_plagiarism": False})})
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize("scope", ["user", "all"])
+async def test_cross_batch_respects_account_boundaries(client, monkeypatch, scope):
+    """Another account's documents are never searched (user) or never revealed (all)."""
+    import uuid
+
+    from app.core.config import settings
+    from app.core.db import AsyncSessionLocal
+    from app.models import Batch, Document, User
+
+    monkeypatch.setattr(settings, "CROSS_BATCH_SCOPE", scope)
+    await client.get("/api/v1/users/me")  # bootstrap the local admin (the viewer) first
+    secret = essay(40, 300)
+    async with AsyncSessionLocal() as s:
+        other = User(id=uuid.uuid4(), email=f"other-{scope}@example.com", hashed_password="x")
+        s.add(other)
+        await s.flush()
+        b = Batch(id=uuid.uuid4(), user_id=other.id, status="completed", name="theirs")
+        s.add(b)
+        await s.flush()
+        s.add(Document(id=uuid.uuid4(), batch_id=b.id, filename="their-private-essay.txt",
+                       text_content=secret, status="completed"))
+        await s.commit()
+
+    resp = await _upload(client, [], {"provider": "local", "check_plagiarism": True, "check_ai": False},
+                         text=" ".join(secret.split()[:150]))
+    await _run_queued(client)
+    body = (await client.get(f"/api/v1/batches/{resp['batch_id']}/results")).json()
+    matches = body["data"][0]["plagiarism_analysis"]
+    raw = json.dumps(body)
+    assert "their-private-essay" not in raw
+    if scope == "user":
+        assert matches == []
+    else:
+        assert matches and matches[0]["similar_document"] == "Document from another account"
+        assert matches[0]["document_id"] is None
+        assert all(m["target_chunk"].startswith("[hidden") for m in matches[0]["matches"])
+        csv = (await client.get(f"/api/v1/batches/{resp['batch_id']}/export/csv")).text
+        assert "their-private-essay" not in csv

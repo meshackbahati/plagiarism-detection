@@ -142,6 +142,7 @@ All configuration in [`backend/.env.docker`](backend/.env.docker):
 | `LIGHTWEIGHT_MODE` | `false` | Skip local ML models ([details](docs/providers.md#model-lifecycle-management)) |
 | `MODEL_UNLOAD_TIMEOUT` | `300` | Seconds idle before models auto-unload, 0 = disabled |
 | `MAX_CROSS_BATCH_DOCS` | `500` | Recent earlier documents checked word-for-word ([cross-batch](docs/plagiarism.md#algorithm-flow)) |
+| `CROSS_BATCH_SCOPE` | `user` | `user`: compare only against the same account's uploads. `all`: shared corpus; other accounts' names and text are hidden in results |
 | `CROSS_BATCH_CANDIDATES` | `20` | pgvector nearest neighbours per document (paraphrase check) |
 | `SHINGLE_SIZE` / `MIN_MATCH_WORDS` | `5` / `8` | Word-for-word sensitivity ([tuning](docs/plagiarism.md#tuning)) |
 | `SEMANTIC_MATCH_THRESHOLD` | `0.82` | Cosine needed to call a chunk a paraphrase |

@@ -85,6 +85,7 @@ async def _run(session: AsyncSession, batch_id: str, provider: str, ai_threshold
         return
 
     analysis_type = batch.analysis_type or "plagiarism"
+    owner_id = batch.user_id
     do_ai = analysis_type in ("ai", "both", "mixed")
     do_plagiarism = analysis_type in ("plagiarism", "both", "mixed")
 
@@ -152,7 +153,7 @@ async def _run(session: AsyncSession, batch_id: str, provider: str, ai_threshold
         # ── Phase 2: cross-batch candidates, fetched once ──
         try:
             candidates = await plagiarism.cross_batch_candidates(
-                str(batch_id), vectors, [d["content_hash"] for d in work]
+                str(batch_id), vectors, [d["content_hash"] for d in work], owner_id=owner_id
             )
         except Exception:
             logger.exception("Cross-batch search failed for batch %s", batch_id)
