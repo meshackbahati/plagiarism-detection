@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { apiRequest } from '../utils/api';
 
@@ -68,21 +68,11 @@ const DashboardPage = () => {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '32px', marginBottom: '60px' }}>
                 {[
-                    { label: 'Total Batches', value: metrics?.num_batches || 0, icon: '📦', color: 'var(--primary)' },
-                    { label: 'Documents Analyzed', value: metrics?.num_documents || 0, icon: '📄', color: 'var(--secondary)' },
-                    { label: 'Avg. per Batch', value: avg, icon: '📊', color: 'var(--accent)' }
+                    { label: 'Total Batches', value: metrics?.num_batches || 0, color: 'var(--primary)' },
+                    { label: 'Documents Analyzed', value: metrics?.num_documents || 0, color: 'var(--secondary)' },
+                    { label: 'Avg. per Batch', value: avg, color: 'var(--accent)' }
                 ].map((stat, i) => (
                     <div key={i} className="glass card-hover" style={{ padding: '32px', position: 'relative', overflow: 'hidden' }}>
-                        <div style={{
-                            position: 'absolute',
-                            top: '-10px',
-                            right: '-10px',
-                            fontSize: '80px',
-                            opacity: 0.05,
-                            transform: 'rotate(15deg)'
-                        }}>
-                            {stat.icon}
-                        </div>
                         <h3 style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600 }}>
                             {stat.label}
                         </h3>
@@ -142,9 +132,7 @@ const DashboardPage = () => {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: '32px' }}>
                 <Link to="/upload" className="glass card-hover" style={{ textDecoration: 'none', color: 'inherit', padding: '40px', display: 'flex', alignItems: 'center', gap: '24px' }}>
-                    <div style={{ fontSize: '40px', background: 'rgba(99, 102, 241, 0.1)', width: '80px', height: '80px', borderRadius: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid rgba(99, 102, 241, 0.2)' }}>
-                        📤
-                    </div>
+                    <span className="badge badge-lg">Upload</span>
                     <div>
                         <h3 style={{ fontSize: '22px', fontWeight: 700, marginBottom: '8px' }}>Upload Documents</h3>
                         <p style={{ fontSize: '15px', color: 'var(--text-secondary)' }}>Check for plagiarism & AI content</p>
@@ -152,9 +140,7 @@ const DashboardPage = () => {
                 </Link>
 
                 <Link to="/ai-check" className="glass card-hover" style={{ textDecoration: 'none', color: 'inherit', padding: '40px', display: 'flex', alignItems: 'center', gap: '24px' }}>
-                    <div style={{ fontSize: '40px', background: 'rgba(236, 72, 153, 0.1)', width: '80px', height: '80px', borderRadius: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid rgba(236, 72, 153, 0.2)' }}>
-                        🤖
-                    </div>
+                    <span className="badge badge-lg" style={{ '--badge-color': 'var(--secondary)' } as CSSProperties}>AI</span>
                     <div>
                         <h3 style={{ fontSize: '22px', fontWeight: 700, marginBottom: '8px' }}>AI Detection</h3>
                         <p style={{ fontSize: '15px', color: 'var(--text-secondary)' }}>Analyze text for AI authorship</p>

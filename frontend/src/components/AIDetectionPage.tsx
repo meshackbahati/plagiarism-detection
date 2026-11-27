@@ -71,7 +71,7 @@ const AIDetectionPage = () => {
                         </div>
                         {provider !== 'local' && (
                             <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                ⚠️ External providers may incur costs
+                                <span className="badge badge-warning">Note</span> External providers may incur costs
                             </div>
                         )}
                     </div>
