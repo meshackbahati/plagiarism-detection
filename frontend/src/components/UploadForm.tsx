@@ -108,7 +108,7 @@ const UploadForm = () => {
                         </div>
                         {provider !== 'local' && (
                             <div style={{ marginTop: '12px', fontSize: '13px', color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                ⚠️ External providers may incur costs and send data to third parties.
+                                <span className="badge badge-warning">Note</span> External providers may incur costs and send data to third parties.
                             </div>
                         )}
                     </div>
@@ -120,9 +120,9 @@ const UploadForm = () => {
                         </label>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px' }}>
                             {[
-                                { id: 'plagiarism', label: 'Plagiarism', icon: '🔍' },
-                                { id: 'ai', label: 'AI Detection', icon: '🤖' },
-                                { id: 'both', label: 'Full Scan', icon: '✨' }
+                                { id: 'plagiarism', label: 'Plagiarism', icon: 'Copy check' },
+                                { id: 'ai', label: 'AI Detection', icon: 'AI' },
+                                { id: 'both', label: 'Full Scan', icon: 'Both' }
                             ].map(type => (
                                 <label key={type.id} style={{ cursor: 'pointer' }}>
                                     <input
@@ -139,7 +139,7 @@ const UploadForm = () => {
                                         borderRadius: '20px',
                                         transition: 'var(--transition)'
                                     }}>
-                                        <div style={{ fontSize: '32px', marginBottom: '12px' }}>{type.icon}</div>
+                                        <div style={{ marginBottom: '12px' }}><span className="badge">{type.icon}</span></div>
                                         <span style={{ fontSize: '15px', fontWeight: 700 }}>{type.label}</span>
                                     </div>
                                 </label>
@@ -184,7 +184,7 @@ const UploadForm = () => {
                             cursor: 'pointer',
                             transition: 'var(--transition)'
                         }}>
-                            <div style={{ fontSize: '64px', marginBottom: '24px' }}>📤</div>
+                            <div style={{ marginBottom: '24px' }}><span className="badge badge-lg">PDF · DOCX · TXT · Images · ZIP</span></div>
                             <h3 style={{ fontSize: '20px', fontWeight: 700, marginBottom: '12px' }}>
                                 <span className="text-gradient-primary">Select files</span> or drag & drop
                             </h3>
@@ -251,7 +251,7 @@ const UploadForm = () => {
 
                 {batchId && (
                     <div className="fade-in" style={{ marginTop: '40px', padding: '32px', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.2)', borderRadius: '24px', textAlign: 'center' }}>
-                        <div style={{ fontSize: '32px', marginBottom: '16px' }}>✅</div>
+                        <div style={{ marginBottom: '16px' }}><span className="badge badge-lg badge-success">Queued</span></div>
                         <p style={{ fontSize: '18px', marginBottom: '24px', color: 'var(--success)', fontWeight: 700 }}>
                             Upload successful! Analysis in progress.
                         </p>
@@ -263,7 +263,7 @@ const UploadForm = () => {
 
                 {error && (
                     <div className="fade-in" style={{ marginTop: '40px', padding: '24px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: '20px', color: 'var(--error)', fontSize: '15px', fontWeight: 600, textAlign: 'center' }}>
-                        ⚠️ {error}
+                        <span className="badge badge-error">Error</span> {error}
                     </div>
                 )}
             </div>

@@ -157,3 +157,23 @@ body {
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
+/* Text badges (replace emoji icons) */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  color: var(--badge-color, var(--primary));
+  background: color-mix(in srgb, var(--badge-color, var(--primary)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--badge-color, var(--primary)) 35%, transparent);
+  white-space: nowrap;
+}
+.badge-lg { font-size: 14px; padding: 6px 14px; }
+.badge-warning { --badge-color: var(--warning); }
+.badge-error { --badge-color: var(--error); }
+.badge-success { --badge-color: var(--success); }

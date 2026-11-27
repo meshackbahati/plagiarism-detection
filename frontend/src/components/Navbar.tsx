@@ -19,7 +19,7 @@ const Navbar = () => {
             justifyContent: 'center',
             boxShadow: '0 4px 12px rgba(99, 102, 241, 0.3)'
           }}>
-            <span style={{ fontSize: '18px' }}>🛡️</span>
+            <span style={{ fontSize: '13px', fontWeight: 800, color: 'white' }}>PD</span>
           </div>
           <span className="text-gradient" style={{ fontSize: '22px', fontWeight: 800, letterSpacing: '-0.02em' }}>
             PlagDetect
