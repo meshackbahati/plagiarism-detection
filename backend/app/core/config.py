@@ -27,6 +27,26 @@ class Settings(BaseSettings):
     LIGHTWEIGHT_MODE: bool = os.getenv("LIGHTWEIGHT_MODE", "false").lower() == "true"
     MODEL_UNLOAD_TIMEOUT: int = int(os.getenv("MODEL_UNLOAD_TIMEOUT", "300"))  # seconds idle before unloading
     MAX_CROSS_BATCH_DOCS: int = int(os.getenv("MAX_CROSS_BATCH_DOCS", "500"))  # max docs for cross-batch search
+
+    # Upload / extraction limits
+    MAX_UPLOAD_BYTES: int = int(os.getenv("MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))
+    MAX_FILES_PER_BATCH: int = int(os.getenv("MAX_FILES_PER_BATCH", "500"))
+    MAX_PDF_PAGES: int = int(os.getenv("MAX_PDF_PAGES", "1000"))
+    MAX_OCR_PAGES: int = int(os.getenv("MAX_OCR_PAGES", "100"))
+    ARCHIVE_MAX_FILES: int = int(os.getenv("ARCHIVE_MAX_FILES", "500"))
+    ARCHIVE_MAX_FILE_BYTES: int = int(os.getenv("ARCHIVE_MAX_FILE_BYTES", str(50 * 1024 * 1024)))
+    ARCHIVE_MAX_TOTAL_BYTES: int = int(os.getenv("ARCHIVE_MAX_TOTAL_BYTES", str(500 * 1024 * 1024)))
+
+    # Plagiarism tuning
+    SHINGLE_SIZE: int = int(os.getenv("SHINGLE_SIZE", "5"))  # words per fingerprint shingle
+    MIN_MATCH_WORDS: int = int(os.getenv("MIN_MATCH_WORDS", "8"))  # shortest copied passage reported
+    SEMANTIC_MATCH_THRESHOLD: float = float(os.getenv("SEMANTIC_MATCH_THRESHOLD", "0.82"))
+    MIN_REPORTED_SIMILARITY: float = float(os.getenv("MIN_REPORTED_SIMILARITY", "0.05"))
+    # "user": compare only against the same account's earlier uploads.
+    # "all": shared corpus (e.g. a whole school); other accounts' file names
+    # and text are redacted in results and reports.
+    CROSS_BATCH_SCOPE: str = os.getenv("CROSS_BATCH_SCOPE", "user").lower()
+    CROSS_BATCH_CANDIDATES: int = int(os.getenv("CROSS_BATCH_CANDIDATES", "20"))
     
     # Celery settings
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")

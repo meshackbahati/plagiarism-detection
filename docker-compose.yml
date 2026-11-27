@@ -1,5 +1,6 @@
 services:
   db:
+    restart: unless-stopped
     image: ankane/pgvector:v0.5.1
     container_name: plagiarism_db
     environment:
@@ -7,7 +8,7 @@ services:
       - POSTGRES_PASSWORD=password
       - POSTGRES_DB=plagiarism_db
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"  # local only: never expose the DB to the network
     volumes:
       - postgres_data:/var/lib/postgresql/data/
     healthcheck:
@@ -21,10 +22,11 @@ services:
           memory: 1G
 
   redis:
+    restart: unless-stopped
     image: redis:7-alpine
     container_name: plagiarism_redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -38,11 +40,12 @@ services:
           memory: 256M
 
   minio:
+    restart: unless-stopped
     image: minio/minio
     container_name: plagiarism_minio
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
@@ -60,6 +63,7 @@ services:
           memory: 512M
 
   frontend:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: frontend/Dockerfile
@@ -75,11 +79,12 @@ services:
           memory: 128M
 
   api:
+    restart: unless-stopped
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: plagiarism_api
-    command: /app/startup.sh api
+    command: /usr/local/bin/startup.sh api
     ports:
       - "8000:8000"
     depends_on:
@@ -92,7 +97,8 @@ services:
     env_file:
       - ./backend/.env.docker
     volumes:
-      - ./backend:/app
+      # Downloaded ML models survive container rebuilds (~600MB).
+      - model_cache:/home/appuser/.cache/huggingface
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -104,13 +110,14 @@ services:
           memory: 2G
 
   celery-worker:
+    restart: unless-stopped
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: plagiarism_celery_worker
     # --concurrency=1: ML models are memory-heavy, run one task at a time
     # to prevent OOM on resource-constrained machines
-    command: /app/startup.sh celery -A app.core.celery.app worker -l info --concurrency=1
+    command: /usr/local/bin/startup.sh celery -A app.core.celery.app worker -l info --concurrency=1
     depends_on:
       redis:
         condition: service_healthy
@@ -119,7 +126,8 @@ services:
     env_file:
       - ./backend/.env.docker
     volumes:
-      - ./backend:/app
+      # Downloaded ML models survive container rebuilds (~600MB).
+      - model_cache:/home/appuser/.cache/huggingface
     deploy:
       resources:
         limits:
@@ -134,7 +142,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: plagiarism_celery_beat
-    command: /app/startup.sh celery -A app.core.celery.app beat -l info
+    command: /usr/local/bin/startup.sh celery -A app.core.celery.app beat -l info
     depends_on:
       redis:
         condition: service_healthy
@@ -143,13 +151,15 @@ services:
     env_file:
       - ./backend/.env.docker
     volumes:
-      - ./backend:/app
+      # Downloaded ML models survive container rebuilds (~600MB).
+      - model_cache:/home/appuser/.cache/huggingface
     deploy:
       resources:
         limits:
           memory: 128M
 
 volumes:
+  model_cache:
   postgres_data:
   redis_data:
   minio_data:

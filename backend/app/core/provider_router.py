@@ -21,21 +21,22 @@ class ProviderRouter:
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.together_api_key = os.getenv("TOGETHER_API_KEY")
         
-        # Check for local model availability (simplified check)
-        self.local_model_available = True 
-        try:
-            import transformers
-            import torch
-        except ImportError:
-            self.local_model_available = False
-            logger.warning("Local model dependencies (transformers, torch) not found.")
+        # find_spec checks the packages are installed without importing
+        # torch (which costs seconds and hundreds of MB per process).
+        import importlib.util
+
+        self.local_model_available = all(
+            importlib.util.find_spec(mod) is not None for mod in ("transformers", "torch")
+        )
+        if not self.local_model_available:
+            logger.info("transformers/torch not installed: local AI detection uses statistical heuristics only.")
 
     def validate_provider(self, provider: str) -> str:
         """
         Validates if the requested provider is available and configured.
         Returns the validated provider string or raises ValueError.
         """
-        provider = provider.lower()
+        provider = (provider or "").lower().strip()
         
         if provider == ProviderType.OPENAI:
             if not self.openai_api_key:
@@ -48,8 +49,8 @@ class ProviderRouter:
             return ProviderType.TOGETHER
             
         elif provider == ProviderType.LOCAL:
-            if not self.local_model_available:
-                raise ValueError("Local provider requested but dependencies are missing.")
+            # Always available: without the ML model the local provider
+            # falls back to statistical heuristics (and says so in its label).
             return ProviderType.LOCAL
             
         else:

@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select
 from app.core.config import settings
-from app.models import User, Base, Batch, Document, Comparison, AIDetection
+from app.models import User
 from passlib.context import CryptContext
 
 # Password hashing context
@@ -51,12 +51,12 @@ async def seed_database():
     """Seed the database with initial admin and sample users"""
     print("Seeding database...")
     
+    engine = create_async_engine(settings.DATABASE_URL)
     try:
-        engine = create_async_engine(settings.DATABASE_URL)
         
-        # Create tables
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        # Create extension, tables and any newly added columns
+        from app.core.schema import ensure_schema
+        await ensure_schema(engine)
         
         # Create session
         async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -109,13 +109,19 @@ async def seed_database():
             print("Database seeding completed!")
             
     except Exception as e:
+        # A broken schema means every upload will fail, so stop start-up
+        # loudly instead of serving a half-working API.
         print(f"Error during database seeding: {str(e)}")
-        # Don't raise the exception to allow the app to continue starting
-        return
+        raise
+    finally:
+        await engine.dispose()
 
 def main():
     """Main function to run the seeding script"""
-    asyncio.run(seed_database())
+    try:
+        asyncio.run(seed_database())
+    except Exception:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

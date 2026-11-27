@@ -91,7 +91,7 @@ When the model is unavailable (lightweight mode or load failure):
   "label": "Likely AI",
   "provider": "local",
   "details": {
-    "model": "roberta-base-openai-detector",
+    "model": "openai-community/roberta-base-openai-detector",
     "model_score": 0.88,
     "heuristic_score": 0.68,
     "chunks_analyzed": 5,

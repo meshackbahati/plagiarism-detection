@@ -1,0 +1,11 @@
+# Development override: live-mount the backend source.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  api:
+    volumes:
+      - ./backend:/app
+      - model_cache:/home/appuser/.cache/huggingface
+  celery-worker:
+    volumes:
+      - ./backend:/app
+      - model_cache:/home/appuser/.cache/huggingface

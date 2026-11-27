@@ -25,6 +25,14 @@ const STATUS_COLORS: Record<string, string> = {
     failed: '#ef4444',
 };
 
+const STATUS_LABELS: Record<string, string> = {
+    completed: 'Completed',
+    completed_with_errors: 'Completed with errors',
+    processing: 'Processing',
+    queued: 'Queued',
+    failed: 'Failed',
+};
+
 const DashboardPage = () => {
     const [metrics, setMetrics] = useState<Metrics | null>(null);
     const [batches, setBatches] = useState<BatchItem[]>([]);
@@ -121,7 +129,7 @@ const DashboardPage = () => {
                                                 color: STATUS_COLORS[batch.status] || '#94a3b8',
                                                 background: `${STATUS_COLORS[batch.status] || '#94a3b8'}20`,
                                             }}>
-                                                {batch.status?.replace(/_/g, ' ') || 'unknown'}
+                                                {STATUS_LABELS[batch.status] || batch.status?.replace(/_/g, ' ') || 'Unknown'}
                                             </span>
                                         </td>
                                         <td style={{ padding: '14px 20px', color: 'var(--text-secondary)', fontSize: '14px' }}>

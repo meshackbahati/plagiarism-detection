@@ -1,53 +1,46 @@
-# Use official Python runtime as a parent image
 FROM python:3.11-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-ENV POETRY_VERSION=2.3.2
-ENV POETRY_VIRTUALENVS_CREATE=false
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    POETRY_VERSION=2.3.2 \
+    POETRY_VIRTUALENVS_CREATE=false \
+    PIP_NO_CACHE_DIR=1
 
-# Set work directory
 WORKDIR /app
 
-# Install system dependencies
+# poppler-utils: renders scanned PDFs for OCR. tesseract-ocr(-eng): OCR.
+# gcc/g++: fallback for any dependency without a prebuilt wheel.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     poppler-utils \
     tesseract-ocr \
-    libtesseract-dev \
-    libleptonica-dev \
-    pkg-config \
-    ffmpeg \
+    tesseract-ocr-eng \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Poetry
 RUN curl -sSL https://install.python-poetry.org | python3 -
 ENV PATH="/root/.local/bin:$PATH"
 
-# Copy poetry files
 COPY pyproject.toml poetry.lock* ./
-
-# Install Python dependencies
+# torch comes from the CPU-only index (see pyproject.toml), ~3GB smaller.
 RUN poetry install --no-interaction --no-ansi --no-root --with ai
 
-# Copy startup script first to ensure it's available and has correct permissions
-COPY startup.sh /app/startup.sh
-RUN chmod +x /app/startup.sh
+# The start script lives outside /app so a bind mount of the source tree
+# (dev setups) can never hide it, and CRLF endings from a Windows checkout
+# are stripped so "exec /app/startup.sh: no such file" cannot happen.
+COPY startup.sh /usr/local/bin/startup.sh
+RUN sed -i 's/\r$//' /usr/local/bin/startup.sh && chmod +x /usr/local/bin/startup.sh
 
-# Copy project
 COPY . .
 
-# Expose port
+RUN adduser --disabled-password --gecos '' appuser \
+    && mkdir -p /app/uploads /home/appuser/.cache/huggingface \
+    && chown -R appuser:appuser /app /home/appuser
+USER appuser
+ENV HF_HOME=/home/appuser/.cache/huggingface
+
 EXPOSE 8000
 
-# Create non-root user for security
-RUN adduser --disabled-password --gecos '' appuser
-RUN chown -R appuser:appuser /app
-USER appuser
-
-# Run the application with the startup script
-CMD ["/app/startup.sh"]
+CMD ["/usr/local/bin/startup.sh", "api"]
