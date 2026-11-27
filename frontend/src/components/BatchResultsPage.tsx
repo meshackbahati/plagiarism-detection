@@ -367,7 +367,7 @@ const BatchResultsPage = () => {
 
             {active && (
                 <div style={{ height: '6px', background: 'rgba(255,255,255,0.08)', borderRadius: '9999px', overflow: 'hidden', marginBottom: '24px' }}>
-                    <div style={{ width: `${progress}%`, height: '100%', background: 'var(--primary)', transition: 'width 0.5s ease' }} />
+                    <div style={{ width: '100%', height: '100%', background: 'var(--primary)', transform: `scaleX(${progress / 100})`, transformOrigin: 'left', transition: 'transform 0.5s ease' }} />
                 </div>
             )}
 
